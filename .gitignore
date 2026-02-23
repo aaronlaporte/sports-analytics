@@ -1,0 +1,8 @@
+keys/
+data/*.db
+__pycache__/
+*.pyc
+*.pkl
+.DS_Store
+venv/
+.env

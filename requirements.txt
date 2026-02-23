@@ -1,0 +1,7 @@
+pandas
+numpy
+requests
+pybaseball
+scikit-learn
+joblib
+openpyxl

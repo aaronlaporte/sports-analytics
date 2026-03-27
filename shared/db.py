@@ -159,6 +159,64 @@ CREATE TABLE IF NOT EXISTS bets (
     pnl           REAL,
     notes         TEXT
 );
+
+-- ── MLB Insights Platform tables ────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS daily_signals (
+    signal_date   TEXT,
+    player_id     INTEGER,
+    signal_type   TEXT,
+    confidence    REAL,
+    headline      TEXT,
+    reasons_json  TEXT,
+    interpretation TEXT,
+    PRIMARY KEY (signal_date, player_id, signal_type)
+);
+
+CREATE TABLE IF NOT EXISTS daily_leaderboard (
+    prediction_date TEXT,
+    player_id       INTEGER,
+    player_name     TEXT,
+    team            TEXT,
+    opponent        TEXT,
+    opp_pitcher     TEXT,
+    daily_rank      INTEGER,
+    daily_score     REAL,
+    p_1hit          REAL,
+    p_2hit          REAL,
+    p_hr            REAL,
+    active_signal_count INTEGER,
+    top_signal      TEXT,
+    top_reason      TEXT,
+    PRIMARY KEY (prediction_date, player_id)
+);
+
+CREATE TABLE IF NOT EXISTS prediction_tracking (
+    prediction_date TEXT,
+    player_id       INTEGER,
+    player_name     TEXT,
+    daily_rank      INTEGER,
+    daily_score     REAL,
+    p_1hit          REAL,
+    p_2hit          REAL,
+    p_hr            REAL,
+    actual_hits     INTEGER,
+    actual_hr       INTEGER,
+    actual_pa       INTEGER,
+    hit_1_correct   INTEGER,
+    hit_2_correct   INTEGER,
+    hr_correct      INTEGER,
+    PRIMARY KEY (prediction_date, player_id)
+);
+
+CREATE TABLE IF NOT EXISTS calibration_summary (
+    summary_date    TEXT,
+    metric_type     TEXT,
+    window_days     INTEGER,
+    value           REAL,
+    sample_size     INTEGER,
+    PRIMARY KEY (summary_date, metric_type, window_days)
+);
 """
 
 # ── NBA Schema ────────────────────────────────────────────────────────────────

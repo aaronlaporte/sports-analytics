@@ -57,13 +57,32 @@ def write_leaderboard(
         "DELETE FROM daily_leaderboard WHERE prediction_date = ?", (date,)
     )
 
+    # Build name lookup from player_lookup table
+    name_map = {}
+    try:
+        for row in conn.execute("SELECT mlbam_id, player_name FROM player_lookup"):
+            name_map[row[0]] = row[1]
+    except Exception:
+        pass
+
+    # Build team lookup from latest batter_stats
+    team_map = {}
+    try:
+        for row in conn.execute(
+            "SELECT batter_id, team FROM batter_stats "
+            "WHERE game_date = ? AND team IS NOT NULL", (date,)
+        ):
+            team_map[row[0]] = row[1]
+    except Exception:
+        pass
+
     rows = []
     for p in top:
         rows.append((
             date,
             p.player_id,
-            None,  # player_name (could enrich later)
-            None,  # team
+            name_map.get(p.player_id),
+            team_map.get(p.player_id),
             None,  # opponent
             None,  # opp_pitcher
             p.daily_rank,
@@ -138,6 +157,14 @@ def write_prediction_tracking(
         "DELETE FROM prediction_tracking WHERE prediction_date = ?", (date,)
     )
 
+    # Build name lookup
+    name_map = {}
+    try:
+        for row in conn.execute("SELECT mlbam_id, player_name FROM player_lookup"):
+            name_map[row[0]] = row[1]
+    except Exception:
+        pass
+
     rows = []
     for p in ranked_players:
         if p.date != date:
@@ -145,7 +172,7 @@ def write_prediction_tracking(
         rows.append((
             date,
             p.player_id,
-            None,  # player_name
+            name_map.get(p.player_id),
             p.daily_rank,
             p.daily_score,
             p.cal_p1hit,

@@ -153,11 +153,17 @@ selected_player = st.sidebar.selectbox(
 st.sidebar.markdown("---")
 st.sidebar.subheader("Date Range")
 
-# Default date range: last 90 days from most recent data
+# Default date range: last 90 days from most recent data across all tables
 conn_tmp = get_connection()
-max_date_row = pd.read_sql(
-    "SELECT MAX(page_date) AS md FROM player_pages", conn_tmp
-)
+max_date_row = pd.read_sql("""
+    SELECT MAX(d) AS md FROM (
+        SELECT MAX(page_date) AS d FROM player_pages
+        UNION ALL
+        SELECT MAX(prediction_date) FROM daily_leaderboard
+        UNION ALL
+        SELECT MAX(game_date) FROM batter_stats
+    )
+""", conn_tmp)
 conn_tmp.close()
 
 if max_date_row["md"].iloc[0]:

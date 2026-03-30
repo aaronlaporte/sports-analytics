@@ -126,6 +126,11 @@ def build_batter_features(conn: sqlite3.Connection, start_date: str = "2024-03-2
 
     df = df[df["events"].isin(VALID_EVENTS)].copy()
     df["game_date"] = pd.to_datetime(df["game_date"])
+    # Ensure batter/pitcher columns are int (SQLite append can produce mixed types)
+    for col in ("batter", "pitcher"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+    df = df.dropna(subset=["batter"])
     df = _add_flags(df)
 
     # Daily aggregation per batter
@@ -266,6 +271,10 @@ def build_pitcher_features(conn: sqlite3.Connection, start_date: str = "2024-03-
 
     df = df[df["events"].isin(VALID_EVENTS)].copy()
     df["game_date"] = pd.to_datetime(df["game_date"])
+    for col in ("batter", "pitcher"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+    df = df.dropna(subset=["pitcher"])
     df = _add_flags(df)
 
     pitcher_daily = (
@@ -359,6 +368,10 @@ def build_matchup_features(conn: sqlite3.Connection, start_date: str = "2024-03-
         return pd.DataFrame()
 
     df = df[df["events"].isin(VALID_EVENTS)].copy()
+    for col in ("batter", "pitcher"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+    df = df.dropna(subset=["batter", "pitcher"])
     df = _add_flags(df)
 
     m = (

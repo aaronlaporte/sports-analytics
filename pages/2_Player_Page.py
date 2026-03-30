@@ -468,6 +468,52 @@ with st.expander("Signal History", expanded=False):
 
 # ── Accuracy Summary ─────────────────────────────────────────────────────────
 
+# ── Game Log ────────────────────────────────────────────────────────────────
+
+st.subheader("Game Log")
+
+if not batter_data.empty:
+    game_log = batter_data[
+        [c for c in ["game_date", "pa", "ab", "hits", "hr", "bb", "so", "avg", "obp", "slg"]
+         if c in batter_data.columns]
+    ].copy()
+
+    game_log = game_log.sort_values("game_date", ascending=False)
+
+    col_rename = {
+        "game_date": "Date",
+        "pa": "PA",
+        "ab": "AB",
+        "hits": "H",
+        "hr": "HR",
+        "bb": "BB",
+        "so": "K",
+        "avg": "AVG",
+        "obp": "OBP",
+        "slg": "SLG",
+    }
+    game_log = game_log.rename(columns=col_rename)
+
+    # Format decimal columns
+    for col in ["AVG", "OBP", "SLG"]:
+        if col in game_log.columns:
+            game_log[col] = game_log[col].apply(
+                lambda x: f"{x:.3f}" if pd.notna(x) else "—"
+            )
+
+    st.dataframe(
+        game_log,
+        use_container_width=True,
+        hide_index=True,
+        height=min(len(game_log) * 38 + 40, 600),
+    )
+else:
+    st.info("No game log data available for the selected date range.")
+
+st.markdown("---")
+
+# ── Accuracy Summary ─────────────────────────────────────────────────────────
+
 with st.expander("Accuracy Summary", expanded=False):
     if not predictions.empty:
         pred_with_act = predictions[predictions["actual_hits"].notna()].copy()

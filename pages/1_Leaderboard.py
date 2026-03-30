@@ -203,7 +203,14 @@ lb = lb.head(top_n)
 
 # ── Header ───────────────────────────────────────────────────────────────────
 
-st.title(f"Daily Leaderboard — {selected_date}")
+# The selected_date is the data date — predictions are for the NEXT day's games
+from datetime import datetime, timedelta
+
+data_date = datetime.strptime(selected_date, "%Y-%m-%d").date()
+prediction_target = data_date + timedelta(days=1)
+
+st.title(f"Predictions for {prediction_target.strftime('%Y-%m-%d')}")
+st.caption(f"Based on data through {selected_date}")
 st.markdown("---")
 
 # ── Summary metrics ──────────────────────────────────────────────────────────

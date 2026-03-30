@@ -248,21 +248,48 @@ st.markdown("---")
 
 st.subheader("Rankings")
 
-display_df = lb[
-    [
-        "daily_rank",
-        "player_name",
-        "daily_score",
-        "p_1hit",
-        "p_2hit",
-        "p_hr",
-        "active_signal_count",
-        "top_signal",
-        "top_reason",
-    ]
-].copy()
+# Join actuals from prediction_tracking for past dates
+@st.cache_data(ttl=300)
+def get_actuals_for_date(dt: str):
+    conn = get_connection()
+    df = pd.read_sql(
+        "SELECT player_id, actual_hits AS actual_h, actual_hr AS actual_hr_, actual_pa AS actual_pa "
+        "FROM prediction_tracking "
+        "WHERE prediction_date = ? AND actual_hits IS NOT NULL",
+        conn,
+        params=(dt,),
+    )
+    conn.close()
+    return df
 
-display_df.columns = [
+actuals_df = get_actuals_for_date(selected_date)
+has_actuals = not actuals_df.empty
+
+# Build display columns
+base_cols = [
+    "daily_rank",
+    "player_name",
+    "daily_score",
+    "p_1hit",
+    "p_2hit",
+    "p_hr",
+    "active_signal_count",
+    "top_signal",
+    "top_reason",
+]
+
+display_df = lb[base_cols].copy()
+
+# Merge actuals if available
+if has_actuals:
+    display_df = display_df.merge(
+        actuals_df,
+        left_on=lb["player_id"].values,
+        right_on="player_id",
+        how="left",
+    ).drop(columns=["key_0", "player_id"], errors="ignore")
+
+display_col_names = [
     "Rank",
     "Player",
     "Score",
@@ -273,6 +300,10 @@ display_df.columns = [
     "Top Signal",
     "Top Reason",
 ]
+if has_actuals:
+    display_col_names += ["H", "HR", "PA"]
+
+display_df.columns = display_col_names
 
 # Format probabilities as percentages
 for col in ["P(1+ Hit)", "P(2+ Hit)", "P(HR)"]:
@@ -281,6 +312,13 @@ for col in ["P(1+ Hit)", "P(2+ Hit)", "P(HR)"]:
     )
 
 display_df["Score"] = display_df["Score"].round(1)
+
+# Format actuals as integers
+if has_actuals:
+    for col in ["H", "HR", "PA"]:
+        display_df[col] = display_df[col].apply(
+            lambda x: int(x) if pd.notna(x) else "—"
+        )
 
 # Style the dataframe
 styled = display_df.style.map(
@@ -294,7 +332,10 @@ st.dataframe(
     height=min(len(display_df) * 38 + 40, 900),
 )
 
-st.caption("Click a player name, then visit the Player Page to drill down.")
+if has_actuals:
+    st.caption("H / HR / PA columns show actual results for this date.")
+else:
+    st.caption("Actuals will appear after games are played and data is refreshed.")
 
 st.markdown("---")
 

@@ -197,29 +197,27 @@ lb_history = get_player_leaderboard_history(player_id, d_start, d_end)
 
 st.title(selected_player.title())
 
-# Get latest page data for header stats
-if not page_data.empty:
-    latest = page_data.iloc[0]
-    hdr1, hdr2, hdr3, hdr4 = st.columns(4)
-    hdr1.metric("Team", latest["team"] if latest["team"] else "—")
-    hdr2.metric(
-        "Current Streak",
-        f"{int(latest['current_streak'])} games" if pd.notna(latest["current_streak"]) else "—",
-    )
-    hdr3.metric(
-        "Season AVG",
-        f"{latest['season_avg']:.3f}" if pd.notna(latest["season_avg"]) else "—",
-    )
-    hdr4.metric(
-        "Daily Score",
-        f"{latest['daily_score']:.1f}" if pd.notna(latest["daily_score"]) else "—",
-        delta=f"Rank #{int(latest['daily_rank'])}" if pd.notna(latest["daily_rank"]) else None,
-    )
-    st.markdown("")
-    streak_val = int(latest["current_streak"]) if pd.notna(latest["current_streak"]) else 0
-    st.info(streak_indicator(streak_val))
-elif not batter_data.empty:
+# Always use batter_stats as source of truth for current form stats (most up to date).
+# Use page_data/lb_history only for daily score and rank.
+if not batter_data.empty:
     latest_bs = batter_data.iloc[-1]
+
+    # Get latest score/rank from page_data or lb_history
+    score_val = "—"
+    rank_delta = None
+    if not page_data.empty:
+        latest_pg = page_data.iloc[0]
+        if pd.notna(latest_pg.get("daily_score")):
+            score_val = f"{latest_pg['daily_score']:.1f}"
+        if pd.notna(latest_pg.get("daily_rank")):
+            rank_delta = f"Rank #{int(latest_pg['daily_rank'])}"
+    elif not lb_history.empty:
+        latest_lb = lb_history.iloc[-1]
+        if pd.notna(latest_lb.get("daily_score")):
+            score_val = f"{latest_lb['daily_score']:.1f}"
+        if pd.notna(latest_lb.get("daily_rank")):
+            rank_delta = f"Rank #{int(latest_lb['daily_rank'])}"
+
     hdr1, hdr2, hdr3, hdr4 = st.columns(4)
     hdr1.metric("Team", latest_bs.get("team", "—") or "—")
     hdr2.metric(
@@ -228,9 +226,13 @@ elif not batter_data.empty:
     )
     hdr3.metric(
         "Season AVG",
-        f"{latest_bs['avg']:.3f}" if pd.notna(latest_bs.get("avg")) else "—",
+        f"{latest_bs['season_hit_pct']:.3f}" if pd.notna(latest_bs.get("season_hit_pct")) else "—",
     )
-    hdr4.metric("Daily Score", "—")
+    hdr4.metric("Daily Score", score_val, delta=rank_delta)
+
+    st.markdown("")
+    streak_val = int(latest_bs["current_streak"]) if pd.notna(latest_bs.get("current_streak")) else 0
+    st.info(streak_indicator(streak_val))
 else:
     st.warning(f"No data found for {selected_player.title()} in the selected date range.")
     st.stop()

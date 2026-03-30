@@ -93,6 +93,65 @@ def score_yesterday(date_str: str, conn: sqlite3.Connection) -> int:
     return scored
 
 
+def score_hr_watch(date_str: str, conn: sqlite3.Connection) -> int:
+    """Score yesterday's HR Watch predictions against actuals.
+
+    Checks the top 10 HR Watch candidates (by p_hr from hr_features)
+    and counts how many actually hit HRs.
+
+    Args:
+        date_str: Today's date (YYYY-MM-DD). Yesterday = date - 1.
+        conn: Open sqlite3 connection.
+
+    Returns:
+        Number of HR Watch hits in top 10.
+    """
+    yesterday = (
+        datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)
+    ).strftime("%Y-%m-%d")
+
+    # Get top 10 HR candidates from hr_features
+    top_hr = conn.execute("""
+        SELECT batter_id, p_hr
+        FROM hr_features
+        WHERE feature_date = ?
+        ORDER BY p_hr DESC
+        LIMIT 10
+    """, (yesterday,)).fetchall()
+
+    if not top_hr:
+        return 0
+
+    # Get actuals
+    hits = 0
+    total = len(top_hr)
+    for row in top_hr:
+        actual = conn.execute("""
+            SELECT hr FROM batter_stats
+            WHERE batter_id = ? AND game_date = ?
+        """, (row["batter_id"], yesterday)).fetchone()
+
+        if actual and (actual["hr"] or 0) >= 1:
+            hits += 1
+
+    # Store in calibration_summary
+    if total > 0:
+        accuracy = hits / total
+        conn.execute("""
+            INSERT OR REPLACE INTO calibration_summary
+                (summary_date, metric_type, window_days, value, sample_size)
+            VALUES (?, 'hr_watch_top10_accuracy', 1, ?, ?)
+        """, (date_str, accuracy, total))
+        conn.commit()
+
+        logger.info(
+            "HR Watch top-10 accuracy for %s: %d/%d (%.1f%%)",
+            yesterday, hits, total, accuracy * 100,
+        )
+
+    return hits
+
+
 def update_calibration_summary(date_str: str, conn: sqlite3.Connection):
     """Compute rolling Brier scores and save to calibration_summary.
 

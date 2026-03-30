@@ -56,7 +56,12 @@ from mlb_insights.outputs.leaderboard import (
 )
 from mlb_insights.outputs.player_page import write_player_pages
 from mlb_insights.outputs.tracking import (
-    score_yesterday, update_calibration_summary, print_tracking_summary,
+    score_yesterday, score_hr_watch, update_calibration_summary,
+    print_tracking_summary,
+)
+from mlb_insights.signal_engine.hr_model import (
+    compute_hr_features, write_hr_features, compute_park_factors,
+    write_park_factors, check_hr_power_signal,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,6 +107,7 @@ def run_single_date(
         print("\n[1/8] Scoring yesterday's predictions ...")
         try:
             scored = score_yesterday(date_str, conn)
+            score_hr_watch(date_str, conn)
             update_calibration_summary(date_str, conn)
             print_tracking_summary(date_str, conn)
         except Exception as exc:
@@ -135,9 +141,24 @@ def run_single_date(
     else:
         print("\n[3/8] Skipping feature build.")
 
+    # Step 3b: Compute HR features
+    print("\n[3b/8] Computing HR features ...")
+    hr_features_map = {}
+    try:
+        hr_df = compute_hr_features(conn, date_str)
+        if not hr_df.empty:
+            write_hr_features(conn, date_str, hr_df)
+            hr_features_map = {
+                int(row["batter_id"]): row for _, row in hr_df.iterrows()
+            }
+            print(f"  HR features computed for {len(hr_df)} batters.")
+        else:
+            print("  No HR features computed (no active batters).")
+    except Exception as exc:
+        logger.error("HR feature computation failed: %s", exc)
+
     # Step 4: Load calibration model
     print("\n[4/8] Loading calibration model ...")
-    models = load_calibration()
     if models is None:
         print("  No calibration model found. Training from scratch ...")
         try:
@@ -206,6 +227,35 @@ def run_single_date(
             cal_p1, cal_p2, cal_phr = calibrate_single(models, raw_p1, raw_p2, raw_phr)
         except Exception:
             cal_p1, cal_p2, cal_phr = raw_p1, raw_p2, raw_phr
+
+        # Override P(HR) with HR model output if available
+        hr_feat = hr_features_map.get(bid)
+        if hr_feat is not None:
+            cal_phr = float(hr_feat["p_hr"])
+
+            # Check hr_power_signal
+            if check_hr_power_signal(
+                float(hr_feat["barrel_rate"]),
+                float(hr_feat["avg_exit_velo"]),
+                float(hr_feat["pitcher_hr_vuln"]),
+            ):
+                from mlb_insights.signal_engine.signals import SignalResult
+                hr_signal = SignalResult(
+                    signal_type="hr_power_signal",
+                    confidence=min(float(hr_feat["barrel_rate"]) / 0.15, 1.0),
+                    headline=(
+                        f"Power surge: {hr_feat['barrel_rate']:.1%} barrel rate, "
+                        f"{hr_feat['avg_exit_velo']:.0f} mph exit velo"
+                    ),
+                    reasons=[
+                        f"Barrel rate: {hr_feat['barrel_rate']:.1%} (>{10}% threshold)",
+                        f"Avg exit velo: {hr_feat['avg_exit_velo']:.1f} mph (>90 threshold)",
+                        f"Pitcher HR vulnerability: {hr_feat['pitcher_hr_vuln']:.2f}x league avg",
+                        f"Park factor: {hr_feat['park_factor']:.2f}",
+                    ],
+                    interpretation="Batter showing elite power metrics against a homer-prone pitcher",
+                )
+                signals.append(hr_signal)
 
         composite_raw = compute_composite_score(cal_p1, cal_p2, cal_phr, signals)
 
@@ -294,6 +344,16 @@ def run_backfill(
         print("  Training calibration model ...")
         models = train_calibration(conn)
 
+    # Compute park factors (once)
+    print("\n[2b/5] Computing park factors ...")
+    try:
+        park_factors_dict = compute_park_factors(conn)
+        write_park_factors(conn, park_factors_dict)
+        print(f"  Park factors computed for {len(park_factors_dict)} teams.")
+    except Exception as exc:
+        logger.error("Park factor computation failed: %s", exc)
+        park_factors_dict = {}
+
     # Build signal context
     print("\n[3/5] Building signal context ...")
     ctx = build_signal_context(conn)
@@ -315,6 +375,18 @@ def run_backfill(
     for idx, date_str in enumerate(dates_list):
         if idx % 50 == 0:
             print(f"  Processing {idx + 1}/{len(dates_list)}: {date_str}")
+
+        # Compute HR features for this date
+        hr_features_map = {}
+        try:
+            hr_df = compute_hr_features(conn, date_str, park_factors=park_factors_dict)
+            if not hr_df.empty:
+                write_hr_features(conn, date_str, hr_df)
+                hr_features_map = {
+                    int(row["batter_id"]): row for _, row in hr_df.iterrows()
+                }
+        except Exception as exc:
+            logger.debug("HR features failed for %s: %s", date_str, exc)
 
         # Get active batters for this date
         batters = conn.execute("""
@@ -367,6 +439,35 @@ def run_backfill(
                 cal_p1, cal_p2, cal_phr = calibrate_single(models, raw_p1, raw_p2, raw_phr)
             except Exception:
                 cal_p1, cal_p2, cal_phr = raw_p1, raw_p2, raw_phr
+
+            # Override P(HR) with HR model output if available
+            hr_feat = hr_features_map.get(bid)
+            if hr_feat is not None:
+                cal_phr = float(hr_feat["p_hr"])
+
+                # Check hr_power_signal
+                if check_hr_power_signal(
+                    float(hr_feat["barrel_rate"]),
+                    float(hr_feat["avg_exit_velo"]),
+                    float(hr_feat["pitcher_hr_vuln"]),
+                ):
+                    from mlb_insights.signal_engine.signals import SignalResult
+                    hr_signal = SignalResult(
+                        signal_type="hr_power_signal",
+                        confidence=min(float(hr_feat["barrel_rate"]) / 0.15, 1.0),
+                        headline=(
+                            f"Power surge: {hr_feat['barrel_rate']:.1%} barrel rate, "
+                            f"{hr_feat['avg_exit_velo']:.0f} mph exit velo"
+                        ),
+                        reasons=[
+                            f"Barrel rate: {hr_feat['barrel_rate']:.1%} (>10% threshold)",
+                            f"Avg exit velo: {hr_feat['avg_exit_velo']:.1f} mph (>90 threshold)",
+                            f"Pitcher HR vulnerability: {hr_feat['pitcher_hr_vuln']:.2f}x league avg",
+                            f"Park factor: {hr_feat['park_factor']:.2f}",
+                        ],
+                        interpretation="Batter showing elite power metrics against a homer-prone pitcher",
+                    )
+                    signals.append(hr_signal)
 
             composite_raw = compute_composite_score(cal_p1, cal_p2, cal_phr, signals)
 

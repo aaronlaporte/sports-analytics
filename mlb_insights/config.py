@@ -103,6 +103,7 @@ SIGNAL_WEIGHTS = {
     "contact_quality_regression": 0.08,
     "pitch_mix_advantage": 0.07,
     "babip_regression": 0.05,
+    "hr_power_signal": 0.08,
 }
 
 # Z-score scaling: z of -3 -> 0, z of +3 -> 100

@@ -50,6 +50,30 @@ CREATE TABLE IF NOT EXISTS calibration_summary (
 );
 """
 
+HR_FEATURES_DDL = """
+CREATE TABLE IF NOT EXISTS hr_features (
+    feature_date TEXT,
+    batter_id INTEGER,
+    barrel_rate REAL,
+    avg_exit_velo REAL,
+    hr_pa_rate REAL,
+    pitcher_hr_vuln REAL,
+    park_factor REAL,
+    platoon_hr_rate REAL,
+    power_trend REAL,
+    p_hr REAL,
+    PRIMARY KEY (feature_date, batter_id)
+);
+"""
+
+PARK_FACTORS_DDL = """
+CREATE TABLE IF NOT EXISTS park_factors (
+    team TEXT PRIMARY KEY,
+    hr_park_factor REAL,
+    sample_size INTEGER
+);
+"""
+
 
 def get_connection(readonly: bool = False) -> sqlite3.Connection:
     """Return a sqlite3 connection to the MLB database.
@@ -103,4 +127,6 @@ def ensure_tables():
     with managed_connection() as conn:
         conn.executescript(PLAYER_PAGES_DDL)
         conn.executescript(CALIBRATION_SUMMARY_DDL)
+        conn.executescript(HR_FEATURES_DDL)
+        conn.executescript(PARK_FACTORS_DDL)
     logger.info("Phase 3 tables verified.")

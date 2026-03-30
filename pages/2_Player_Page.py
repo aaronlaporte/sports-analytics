@@ -389,6 +389,291 @@ with right_col:
     else:
         st.info("No signals found for this player in the selected date range.")
 
+# ── Power Profile ────────────────────────────────────────────────────────────
+
+st.markdown("---")
+st.subheader("Power Profile")
+
+
+@st.cache_data(ttl=300)
+def get_hr_features_for_player(pid: int, date_start: str, date_end: str):
+    conn = get_connection()
+    try:
+        df = pd.read_sql(
+            "SELECT * FROM hr_features "
+            "WHERE batter_id = ? AND feature_date BETWEEN ? AND ? "
+            "ORDER BY feature_date DESC LIMIT 1",
+            conn,
+            params=(pid, date_start, date_end),
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+@st.cache_data(ttl=300)
+def get_barrel_rate_history(pid: int, end_date: str):
+    """Compute barrel rate and exit velo history from statcast_staging."""
+    conn = get_connection()
+    try:
+        # Load raw BBE data
+        df = pd.read_sql(
+            """
+            SELECT game_date, launch_speed, launch_angle
+            FROM statcast_staging
+            WHERE batter = ?
+              AND launch_speed IS NOT NULL
+              AND launch_speed > 0
+              AND game_date <= ?
+            ORDER BY game_date, at_bat_number
+            """,
+            conn,
+            params=(pid, end_date),
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Compute rolling barrel rate
+    BARREL_MIN_SPEED = 98.0
+    BARREL_BASE_ANGLE_MIN = 26.0
+    BARREL_BASE_ANGLE_MAX = 30.0
+    BARREL_ANGLE_MAX_CAP = 50.0
+    ROLLING_WINDOW = 50
+
+    def is_barrel(speed, angle):
+        if pd.isna(speed) or pd.isna(angle) or speed < BARREL_MIN_SPEED:
+            return False
+        extra = speed - BARREL_MIN_SPEED
+        return BARREL_BASE_ANGLE_MIN <= angle <= min(BARREL_BASE_ANGLE_MAX + extra, BARREL_ANGLE_MAX_CAP)
+
+    df["is_barrel"] = df.apply(lambda r: is_barrel(r["launch_speed"], r["launch_angle"]), axis=1)
+
+    # Group by game date and compute rolling metrics
+    game_groups = df.groupby("game_date")
+    all_bbes = []
+    results = []
+
+    for date in sorted(df["game_date"].unique()):
+        game_df = game_groups.get_group(date)
+        for _, row in game_df.iterrows():
+            all_bbes.append({
+                "speed": row["launch_speed"],
+                "barrel": row["is_barrel"],
+            })
+
+        window = all_bbes[-ROLLING_WINDOW:]
+        if len(window) >= 10:
+            br = sum(1 for b in window if b["barrel"]) / len(window)
+            avg_velo = sum(b["speed"] for b in window) / len(window)
+            results.append({
+                "game_date": date,
+                "barrel_rate": br,
+                "avg_exit_velo": avg_velo,
+            })
+
+    return pd.DataFrame(results)
+
+
+hr_feat_df = get_hr_features_for_player(player_id, d_start, d_end)
+barrel_history = get_barrel_rate_history(player_id, d_end)
+
+if not barrel_history.empty or not hr_feat_df.empty:
+    power_col1, power_col2 = st.columns(2)
+
+    # a) Barrel Rate Trend
+    with power_col1:
+        header_col, info_col = st.columns([8, 1])
+        with header_col:
+            st.markdown("**Barrel Rate Trend**")
+        with info_col:
+            with st.popover("?"):
+                st.markdown(
+                    "**Barrel Rate** measures the percentage of batted balls hit at optimal "
+                    "speed (98+ mph) and angle (26-30 deg). Barrels become HRs about 70% of "
+                    "the time. League average is ~6.5%."
+                )
+
+        if not barrel_history.empty:
+            fig_br = go.Figure()
+            fig_br.add_trace(go.Scatter(
+                x=barrel_history["game_date"],
+                y=barrel_history["barrel_rate"],
+                mode="lines",
+                name="Barrel Rate",
+                line=dict(color="#ff6b6b", width=2),
+            ))
+            fig_br.add_hline(
+                y=0.065,
+                line_dash="dash",
+                line_color="gray",
+                annotation_text="League Avg (6.5%)",
+                annotation_position="top right",
+            )
+            fig_br.update_layout(
+                height=350,
+                margin=dict(t=20, b=40, l=40, r=20),
+                yaxis_title="Barrel Rate",
+                yaxis_tickformat=".1%",
+                xaxis_title="Date",
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig_br, use_container_width=True)
+        else:
+            st.info("Not enough batted ball data for barrel rate chart.")
+
+    # b) Exit Velocity Trend
+    with power_col2:
+        header_col, info_col = st.columns([8, 1])
+        with header_col:
+            st.markdown("**Exit Velocity Trend**")
+        with info_col:
+            with st.popover("?"):
+                st.markdown(
+                    "**Average Exit Velocity** measures how hard a batter hits the ball. "
+                    "Higher exit velocity correlates strongly with home runs and extra-base "
+                    "hits. League average is ~88 mph."
+                )
+
+        if not barrel_history.empty:
+            fig_ev = go.Figure()
+            fig_ev.add_trace(go.Scatter(
+                x=barrel_history["game_date"],
+                y=barrel_history["avg_exit_velo"],
+                mode="lines",
+                name="Avg Exit Velo",
+                line=dict(color="#4dabf7", width=2),
+            ))
+            fig_ev.add_hline(
+                y=88.0,
+                line_dash="dash",
+                line_color="gray",
+                annotation_text="League Avg (88 mph)",
+                annotation_position="top right",
+            )
+            fig_ev.update_layout(
+                height=350,
+                margin=dict(t=20, b=40, l=40, r=20),
+                yaxis_title="Avg Exit Velo (mph)",
+                xaxis_title="Date",
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig_ev, use_container_width=True)
+        else:
+            st.info("Not enough batted ball data for exit velocity chart.")
+
+    # c) Power Profile vs League
+    if not hr_feat_df.empty:
+        latest_hr = hr_feat_df.iloc[0]
+
+        profile_col, park_col = st.columns([3, 1])
+
+        with profile_col:
+            header_col, info_col = st.columns([8, 1])
+            with header_col:
+                st.markdown("**Power Profile vs League**")
+            with info_col:
+                with st.popover("?"):
+                    st.markdown(
+                        "This chart compares the batter's power metrics to league averages. "
+                        "Values above 1.0x mean the batter is above average in that category."
+                    )
+
+            # Compute ratios vs league
+            metrics = {
+                "Barrel Rate": (latest_hr.get("barrel_rate", 0) or 0) / 0.065 if 0.065 > 0 else 1.0,
+                "Exit Velo": (latest_hr.get("avg_exit_velo", 88) or 88) / 88.0,
+                "HR/PA Rate": (latest_hr.get("hr_pa_rate", 0.035) or 0.035) / 0.035 if 0.035 > 0 else 1.0,
+            }
+
+            metric_names = list(metrics.keys())
+            metric_values = list(metrics.values())
+
+            colors = []
+            for v in metric_values:
+                if v >= 1.3:
+                    colors.append("#6bcb77")
+                elif v >= 1.0:
+                    colors.append("#4dabf7")
+                else:
+                    colors.append("#ff6b6b")
+
+            fig_profile = go.Figure()
+            fig_profile.add_trace(go.Bar(
+                y=metric_names,
+                x=metric_values,
+                orientation="h",
+                marker_color=colors,
+                text=[f"{v:.2f}x" for v in metric_values],
+                textposition="outside",
+            ))
+            fig_profile.add_vline(
+                x=1.0,
+                line_dash="dash",
+                line_color="gray",
+                annotation_text="League Avg",
+            )
+            fig_profile.update_layout(
+                height=200,
+                margin=dict(t=10, b=20, l=80, r=40),
+                xaxis_title="vs League Average",
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig_profile, use_container_width=True)
+
+        # d) Park Factor indicator
+        with park_col:
+            header_col, info_col = st.columns([3, 1])
+            with header_col:
+                st.markdown("**Park Factor**")
+            with info_col:
+                with st.popover("?"):
+                    st.markdown(
+                        "**Park Factor** measures how a ballpark affects home run rates. "
+                        "1.0 is neutral. Values above 1.0 mean the park boosts HRs "
+                        "(e.g., Coors Field ~1.3). Below 1.0 means the park suppresses "
+                        "HRs (e.g., Oracle Park ~0.7)."
+                    )
+
+            pf_val = latest_hr.get("park_factor", None)
+            if pf_val and pd.notna(pf_val):
+                pf_val = float(pf_val)
+                if pf_val >= 1.1:
+                    pf_label = "HR-Friendly"
+                elif pf_val >= 0.95:
+                    pf_label = "Neutral"
+                else:
+                    pf_label = "Pitcher-Friendly"
+
+                st.metric(
+                    "Today's Park",
+                    f"{pf_val:.2f}",
+                    delta=pf_label,
+                    delta_color="normal" if pf_val >= 1.0 else "inverse",
+                )
+            else:
+                st.metric("Today's Park", "--")
+
+            p_hr_val = latest_hr.get("p_hr", None)
+            if p_hr_val and pd.notna(p_hr_val):
+                st.metric("P(HR)", f"{float(p_hr_val) * 100:.1f}%")
+            else:
+                st.metric("P(HR)", "--")
+    else:
+        st.info("No HR feature data available for this player. Run the pipeline to generate HR features.")
+else:
+    st.info("No power profile data available for this player in the selected date range.")
+
 # ── Full width: Prediction History ───────────────────────────────────────────
 
 st.markdown("---")

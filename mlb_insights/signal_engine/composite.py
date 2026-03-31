@@ -44,13 +44,18 @@ class ScoredPlayer:
     def top_signal(self) -> str | None:
         if self.signals:
             return self.signals[0].signal_type
-        return None
+        return "base_probability"
 
     @property
     def top_reason(self) -> str | None:
         if self.signals:
             return self.signals[0].headline
-        return None
+        # Explain why this player ranks high despite no signals
+        return (
+            f"High base probability — P(1H) {self.cal_p1hit*100:.0f}%, "
+            f"P(2H) {self.cal_p2hit*100:.0f}%, "
+            f"P(HR) {self.cal_phr*100:.0f}%"
+        )
 
 
 def compute_composite_score(

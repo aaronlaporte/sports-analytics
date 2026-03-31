@@ -198,14 +198,11 @@ def run_single_date(
         except Exception as exc:
             logger.error("Tracking step failed: %s", exc)
 
-    # Step 2: Pull Statcast
+    # Step 2: Pull Statcast for the data-through date
     if not skip_ingest:
-        print("\n[2/8] Pulling Statcast data ...")
+        print(f"\n[2/8] Pulling Statcast data for {date_str} ...")
         try:
-            yesterday = (
-                datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)
-            ).strftime("%Y-%m-%d")
-            pull_statcast(yesterday, conn)
+            pull_statcast(date_str, conn)
         except Exception as exc:
             logger.error("Statcast pull failed: %s", exc)
     else:
@@ -585,8 +582,10 @@ def main():
     )
     parser.add_argument(
         "--date",
-        default=datetime.today().strftime("%Y-%m-%d"),
-        help="Prediction date (default: today). Format: YYYY-MM-DD",
+        default=(datetime.today() - timedelta(days=1)).strftime("%Y-%m-%d"),
+        help="Data-through date (default: yesterday). Format: YYYY-MM-DD. "
+             "The pipeline pulls data through this date and generates "
+             "predictions for the following day.",
     )
     parser.add_argument(
         "--backfill",

@@ -125,7 +125,7 @@ def build_batter_features(conn: sqlite3.Connection, start_date: str = "2024-03-2
         return pd.DataFrame()
 
     df = df[df["events"].isin(VALID_EVENTS)].copy()
-    df["game_date"] = pd.to_datetime(df["game_date"])
+    df["game_date"] = pd.to_datetime(df["game_date"].astype(str).str[:10], format="%Y-%m-%d")
     # Ensure batter/pitcher columns are int (SQLite append can produce mixed types)
     for col in ("batter", "pitcher"):
         if col in df.columns:
@@ -270,7 +270,7 @@ def build_pitcher_features(conn: sqlite3.Connection, start_date: str = "2024-03-
         return pd.DataFrame()
 
     df = df[df["events"].isin(VALID_EVENTS)].copy()
-    df["game_date"] = pd.to_datetime(df["game_date"])
+    df["game_date"] = pd.to_datetime(df["game_date"].astype(str).str[:10], format="%Y-%m-%d")
     for col in ("batter", "pitcher"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")

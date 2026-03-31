@@ -213,10 +213,19 @@ def compute_hr_features(
         except Exception:
             park_factors = {}
 
-    # Get active batters for this date
+    # Get active batters for this date (or most recent date if no data for exact date)
     batters = conn.execute("""
         SELECT DISTINCT batter_id, team FROM batter_stats WHERE game_date = ?
     """, (game_date,)).fetchall()
+
+    if not batters:
+        # Fall back to most recent date with data (for prediction-day lookups)
+        batters = conn.execute("""
+            SELECT DISTINCT batter_id, team FROM batter_stats
+            WHERE game_date = (SELECT MAX(game_date) FROM batter_stats WHERE game_date <= ?)
+        """, (game_date,)).fetchall()
+        logger.info("HR model: no batters for %s, using %d from most recent date.",
+                     game_date, len(batters))
 
     if not batters:
         return pd.DataFrame()
@@ -229,7 +238,7 @@ def compute_hr_features(
     placeholders = ",".join("?" * len(batter_ids))
     cur.execute(f"""
         SELECT game_date, batter, pitcher, events, launch_speed, launch_angle,
-               p_throws, home_team, away_team
+               p_throws, home_team, away_team, inning_topbot
         FROM statcast_staging
         WHERE batter IN ({placeholders})
           AND game_date < ?
@@ -238,13 +247,30 @@ def compute_hr_features(
         ORDER BY batter, game_date, at_bat_number, pitch_number
     """, batter_ids + [game_date])
 
-    # Organize by batter
+    # Organize by batter and derive team from most recent appearance
     batter_bbes = defaultdict(list)
+    batter_recent_team = {}
+    batter_recent_date = {}
     for row in cur.fetchall():
-        batter_bbes[row["batter"]].append(dict(row))
+        d = dict(row)
+        bid = row["batter"]
+        batter_bbes[bid].append(d)
+        rd = row["game_date"]
+        if bid not in batter_recent_date or rd > batter_recent_date[bid]:
+            batter_recent_date[bid] = rd
+            # Derive team: if batting top inning -> away team, else home team
+            if row["inning_topbot"] == "Top":
+                batter_recent_team[bid] = row["away_team"]
+            else:
+                batter_recent_team[bid] = row["home_team"]
+
+    # Fill batter_teams with derived teams where NULL
+    for bid in batter_ids:
+        if not batter_teams.get(bid) and bid in batter_recent_team:
+            batter_teams[bid] = batter_recent_team[bid]
 
     # ── Load pitcher HR stats ────────────────────────────────────────────
-    # Get opposing pitchers for this date
+    # Get opposing pitchers for this date (if statcast data exists for the date)
     opp_pitchers = conn.execute(f"""
         SELECT DISTINCT batter, pitcher
         FROM statcast_staging
@@ -256,6 +282,23 @@ def compute_hr_features(
     batter_pitcher_map = defaultdict(set)
     for r in opp_pitchers:
         batter_pitcher_map[r["batter"]].add(r["pitcher"])
+
+    # If no statcast for prediction day, use most recent game's opposing pitchers
+    if not batter_pitcher_map:
+        max_date_row = conn.execute("""
+            SELECT MAX(game_date) as md FROM statcast_staging WHERE game_date < ?
+        """, (game_date,)).fetchone()
+        recent_date = max_date_row["md"] if max_date_row else None
+        if recent_date:
+            opp_pitchers = conn.execute(f"""
+                SELECT DISTINCT batter, pitcher
+                FROM statcast_staging
+                WHERE batter IN ({placeholders})
+                  AND game_date = ?
+                  AND events IS NOT NULL
+            """, batter_ids + [recent_date]).fetchall()
+            for r in opp_pitchers:
+                batter_pitcher_map[r["batter"]].add(r["pitcher"])
 
     # Get all pitcher IDs we need
     all_pitcher_ids = set()
@@ -361,6 +404,14 @@ def compute_hr_features(
 
     for r in venue_rows:
         game_venues[r["batter"]] = r["home_team"]
+
+    # If no venues found (future prediction date), derive from batter's team
+    # Assume home game as rough approximation
+    if not game_venues:
+        for bid in batter_ids:
+            team = batter_teams.get(bid)
+            if team:
+                game_venues[bid] = team
 
     # ── Compute features per batter ──────────────────────────────────────
     results = []

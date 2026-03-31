@@ -75,6 +75,9 @@ def pull_statcast(date_str: str, conn: sqlite3.Connection) -> int:
     df = df[available].copy()
     df = df.dropna(subset=["game_pk", "batter", "pitcher"])
 
+    # Convert pandas NA/NaN to None for SQLite compatibility
+    df = df.astype(object).where(df.notna(), None)
+
     rows = list(df.itertuples(index=False, name=None))
     placeholders = ",".join(["?"] * len(available))
     col_names = ",".join(available)

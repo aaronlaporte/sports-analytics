@@ -159,6 +159,11 @@ def run_single_date(
 
     # Step 4: Load calibration model
     print("\n[4/8] Loading calibration model ...")
+    models = None
+    try:
+        models = load_calibration()
+    except Exception as exc:
+        logger.error("Calibration load failed: %s", exc)
     if models is None:
         print("  No calibration model found. Training from scratch ...")
         try:

@@ -77,6 +77,91 @@ def _setup_logging(verbose: bool = False):
     )
 
 
+# ── Per-Player Probability Model ─────────────────────────────────────────────
+
+# League average base rates
+_LEAGUE_AVG_1HIT = 0.650   # ~65% of games a qualified batter gets 1+ hit
+_LEAGUE_AVG_2HIT = 0.227   # ~22.7% of games get 2+ hits
+_LEAGUE_AVG_HR = 0.040     # ~4% of games a batter hits a HR
+
+# Avg PA per game for probability conversion
+_AVG_PA_PER_GAME = 3.8
+
+
+def _compute_player_probabilities(
+    ctx: SignalContext, batter_id: int, date_str: str
+) -> tuple[float, float, float]:
+    """Compute per-player P(1+ hit), P(2+ hit), P(HR) from batter_stats.
+
+    Uses the player's season batting average and recent form to produce
+    differentiated probabilities instead of a flat league average.
+
+    The model:
+    - Estimates per-AB hit probability from a blend of season avg and recent form
+    - Converts to per-game probability: P(1+ hit) = 1 - (1 - p_hit)^PA
+    - P(2+ hit) uses binomial: 1 - (1-p)^n - n*p*(1-p)^(n-1)
+
+    Returns:
+        (p_1hit, p_2hit, p_hr) — clamped to reasonable bounds.
+    """
+    from mlb_insights.signal_engine.signals import _get_batter_stats
+
+    bs = _get_batter_stats(ctx, batter_id, date_str)
+    if not bs:
+        return _LEAGUE_AVG_1HIT, _LEAGUE_AVG_2HIT, _LEAGUE_AVG_HR
+
+    season_hit_pct = bs.get("season_hit_pct", 0) or 0
+    season_pa = bs.get("season_pa", 0) or 0
+    hits_pg_5 = bs.get("hits_pg_5", 0) or 0
+    hits_pg_10 = bs.get("hits_pg_10", 0) or 0
+
+    if season_pa < 20 or season_hit_pct <= 0:
+        return _LEAGUE_AVG_1HIT, _LEAGUE_AVG_2HIT, _LEAGUE_AVG_HR
+
+    # Blend season avg with recent form for per-AB hit probability
+    # Recent form: hits in last 5 games / approximate AB in 5 games
+    recent_ab_approx = 5 * _AVG_PA_PER_GAME * 0.88  # ~16.7 AB in 5 games
+    recent_hit_rate = hits_pg_5 / recent_ab_approx if recent_ab_approx > 0 else 0
+
+    # Weight: season gets more weight as sample grows, recent form adds volatility
+    season_weight = min(season_pa / 200.0, 0.70)  # caps at 70% weight
+    recent_weight = 1.0 - season_weight
+
+    # Blended per-AB hit probability
+    p_hit_ab = season_weight * season_hit_pct + recent_weight * recent_hit_rate
+
+    # Clamp to reasonable range (no one hits .400+ sustained, floor at .100)
+    p_hit_ab = max(0.100, min(0.380, p_hit_ab))
+
+    # Convert per-AB to per-game probabilities
+    # Assuming ~3.8 PA per game, ~88% are AB
+    ab_per_game = _AVG_PA_PER_GAME * 0.88  # ~3.34 AB
+
+    # P(1+ hit in game) = 1 - P(0 hits) = 1 - (1 - p)^n
+    p_1hit = 1.0 - (1.0 - p_hit_ab) ** ab_per_game
+
+    # P(2+ hits in game) = 1 - P(0 hits) - P(exactly 1 hit)
+    # P(exactly 1) = C(n,1) * p * (1-p)^(n-1)
+    p_exactly_1 = ab_per_game * p_hit_ab * (1.0 - p_hit_ab) ** (ab_per_game - 1)
+    p_2hit = 1.0 - (1.0 - p_hit_ab) ** ab_per_game - p_exactly_1
+
+    # P(HR) — rough estimate from season HR rate, will be overridden by HR model
+    season_hits = bs.get("season_hits", 0) or 0
+    hr_from_stats = bs.get("hr", 0) or 0  # today's HR count (not useful)
+
+    # Use season HR data if available in batter_stats
+    # HR rate per AB * AB per game
+    # We don't have season_hr in batter_stats directly, use league avg scaled
+    p_hr = _LEAGUE_AVG_HR  # Will be overridden by HR model anyway
+
+    # Clamp to reasonable bounds
+    p_1hit = max(0.30, min(0.90, p_1hit))
+    p_2hit = max(0.05, min(0.55, p_2hit))
+    p_hr = max(0.01, min(0.20, p_hr))
+
+    return round(p_1hit, 4), round(p_2hit, 4), round(p_hr, 4)
+
+
 # ── Single-Date Pipeline ─────────────────────────────────────────────────────
 
 def run_single_date(
@@ -208,25 +293,8 @@ def run_single_date(
             pitcher_vuln=pitcher_vuln,
         )
 
-        # Get calibrated probabilities from prediction_tracking or compute defaults
-        pt = conn.execute("""
-            SELECT p_1hit, p_2hit, p_hr FROM prediction_tracking
-            WHERE player_id = ? AND prediction_date = ?
-        """, (bid, date_str)).fetchone()
-
-        if pt and pt["p_1hit"] is not None:
-            raw_p1 = pt["p_1hit"]
-            raw_p2 = pt["p_2hit"] or 0.0
-            raw_phr = pt["p_hr"] or 0.0
-        else:
-            # Use daily_picks if available
-            dp = conn.execute("""
-                SELECT model_prob FROM daily_picks
-                WHERE batter_id = ? AND pick_date = ?
-            """, (bid, date_str)).fetchone()
-            raw_p1 = dp["model_prob"] if dp else 0.65  # default base rate
-            raw_p2 = raw_p1 * 0.35  # approximate
-            raw_phr = raw_p1 * 0.04  # approximate
+        # Compute per-player base probabilities from batter_stats
+        raw_p1, raw_p2, raw_phr = _compute_player_probabilities(ctx, bid, date_str)
 
         try:
             cal_p1, cal_p2, cal_phr = calibrate_single(models, raw_p1, raw_p2, raw_phr)
@@ -423,22 +491,8 @@ def run_backfill(
                 pitcher_vuln=pitcher_vuln,
             )
 
-            # Get probabilities from prediction_tracking
-            pt = conn.execute("""
-                SELECT p_1hit, p_2hit, p_hr FROM prediction_tracking
-                WHERE player_id = ? AND prediction_date = ?
-            """, (bid, date_str)).fetchone()
-
-            if pt and pt["p_1hit"] is not None:
-                raw_p1, raw_p2, raw_phr = pt["p_1hit"], pt["p_2hit"] or 0.0, pt["p_hr"] or 0.0
-            else:
-                dp = conn.execute("""
-                    SELECT model_prob FROM daily_picks
-                    WHERE batter_id = ? AND pick_date = ?
-                """, (bid, date_str)).fetchone()
-                raw_p1 = dp["model_prob"] if dp else 0.65
-                raw_p2 = raw_p1 * 0.35
-                raw_phr = raw_p1 * 0.04
+            # Compute per-player base probabilities from batter_stats
+            raw_p1, raw_p2, raw_phr = _compute_player_probabilities(ctx, bid, date_str)
 
             try:
                 cal_p1, cal_p2, cal_phr = calibrate_single(models, raw_p1, raw_p2, raw_phr)

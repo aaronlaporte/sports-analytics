@@ -31,6 +31,9 @@ from mlb_insights.config import (
     BABIP_MIN_SEASON_PA, BABIP_MIN_GAP, BABIP_GAP_SCALE,
     BABIP_CONFIDENCE_SCALE, BABIP_APPROX_HR_RATE, BABIP_APPROX_SO_RATE,
     BABIP_APPROX_AB_RATIO,
+    STREAK_CEILING_MIN_SEASON_PA, STREAK_CEILING_MIN_STREAK_INSTANCES,
+    STREAK_CEILING_COLD_MIN_LEN, STREAK_CEILING_HOT_MIN_LEN,
+    STREAK_CEILING_BUFFER,
     MIN_PITCHER_BF,
     LAUNCH_SPEED_N_GAMES, LAUNCH_SPEED_BATTED_BALLS_PER_GAME,
     LAUNCH_SPEED_MIN_SAMPLES,
@@ -73,6 +76,9 @@ class SignalContext:
     batter_launch_speeds: dict  # batter_id -> [(date, speed), ...]
     batter_vs_hand: dict        # (batter_id, hand) -> {pa, hits, avg}
     pitcher_handedness: dict    # pitcher_id -> 'L' or 'R'
+    batter_streak_history: dict = field(default_factory=dict)
+    # batter_id -> {max_cold: int, max_hot: int,
+    #               cold_counts: {len: count}, hot_counts: {len: count}}
 
 
 def build_signal_context(conn: sqlite3.Connection) -> SignalContext:
@@ -174,9 +180,14 @@ def build_signal_context(conn: sqlite3.Connection) -> SignalContext:
             "pa": pa, "hits": hits, "avg": hits / pa if pa > 0 else 0.0,
         }
 
+    # Streak history: compute max cold/hot streaks and frequency per batter
+    logger.info("Computing streak ceiling history ...")
+    batter_streak_history = _compute_streak_history(batter_stats, batter_dates)
+
     logger.info(
-        "Signal context ready: %d batter-dates, %d pitcher-dates, %d launch batters.",
+        "Signal context ready: %d batter-dates, %d pitcher-dates, %d launch batters, %d streak histories.",
         len(batter_stats), len(pitcher_career), len(batter_launch_speeds),
+        len(batter_streak_history),
     )
 
     return SignalContext(
@@ -187,6 +198,7 @@ def build_signal_context(conn: sqlite3.Connection) -> SignalContext:
         batter_launch_speeds=batter_launch_speeds,
         batter_vs_hand=batter_vs_hand,
         pitcher_handedness=pitcher_handedness,
+        batter_streak_history=batter_streak_history,
     )
 
 
@@ -567,6 +579,216 @@ def babip_regression(
     )
 
 
+# ── Streak Ceiling Signals ──────────────────────────────────────────────────
+
+
+def _compute_streak_history(
+    batter_stats: dict, batter_dates: dict
+) -> dict:
+    """Compute historical max streaks and streak-length frequency per batter.
+
+    Walks through each batter's game-by-game streak values and tracks:
+    - How many times they've had a cold streak of length N
+    - How many times they've had a hot streak of length N
+    - Their all-time max cold and hot streak lengths
+
+    This mirrors the user's derive_streak_summary_scaled() logic.
+
+    Returns:
+        Dict of batter_id -> {
+            max_cold: int,  max_hot: int,
+            cold_counts: {length: count}, hot_counts: {length: count}
+        }
+    """
+    result = {}
+
+    for batter_id, dates in batter_dates.items():
+        max_cold = 0
+        max_hot = 0
+        cold_counts = defaultdict(int)  # length -> how many times reached
+        hot_counts = defaultdict(int)
+
+        for d in dates:
+            bs = batter_stats.get((batter_id, d))
+            if not bs:
+                continue
+            streak = bs.get("current_streak")
+            if streak is None or not isinstance(streak, (int, float)):
+                continue
+            streak = int(streak)
+
+            if streak < 0:
+                cold_len = abs(streak)
+                if cold_len > max_cold:
+                    max_cold = cold_len
+                # Count: this date was part of a cold streak of at least cold_len
+                for length in range(STREAK_CEILING_COLD_MIN_LEN, cold_len + 1):
+                    cold_counts[length] += 1
+            elif streak > 0:
+                if streak > max_hot:
+                    max_hot = streak
+                for length in range(STREAK_CEILING_HOT_MIN_LEN, streak + 1):
+                    hot_counts[length] += 1
+
+        result[batter_id] = {
+            "max_cold": max_cold,
+            "max_hot": max_hot,
+            "cold_counts": dict(cold_counts),
+            "hot_counts": dict(hot_counts),
+        }
+
+    return result
+
+
+def streak_ceiling_cold(
+    ctx: SignalContext, batter_id: int, date: str
+) -> SignalResult | None:
+    """Signal 7: Batter's cold streak is at or near their historical max.
+
+    If a player has never gone more than 7 games without a hit, and they're
+    currently at game 7, history says they'll rebound. The signal fires when
+    the current cold streak is within STREAK_CEILING_BUFFER of their all-time
+    max cold streak.
+
+    Higher confidence when:
+    - They've hit this ceiling multiple times before (pattern is reliable)
+    - They're exactly at the max (not just approaching)
+    - They're a quality hitter (higher season avg)
+    """
+    bs = _get_batter_stats(ctx, batter_id, date)
+    if not bs:
+        return None
+
+    streak = bs.get("current_streak", 0) or 0
+    if streak >= 0:
+        return None  # Not in a cold streak
+
+    cold_len = abs(streak)
+    if cold_len < STREAK_CEILING_COLD_MIN_LEN:
+        return None
+
+    season_pa = bs.get("season_pa", 0) or 0
+    if season_pa < STREAK_CEILING_MIN_SEASON_PA:
+        return None
+
+    history = ctx.batter_streak_history.get(batter_id)
+    if not history:
+        return None
+
+    max_cold = history["max_cold"]
+    if max_cold < STREAK_CEILING_COLD_MIN_LEN:
+        return None  # Not enough streak history
+
+    # Fire if current cold streak is within BUFFER of historical max
+    if cold_len < max_cold - STREAK_CEILING_BUFFER:
+        return None  # Not close enough to ceiling
+
+    # Check that they've hit this streak length enough times for pattern reliability
+    times_at_this_length = history["cold_counts"].get(cold_len, 0)
+    if times_at_this_length < STREAK_CEILING_MIN_STREAK_INSTANCES:
+        return None  # Not enough historical instances
+
+    # Confidence factors
+    # 1. Proximity to ceiling (at max = 1.0, one game away = 0.6)
+    proximity = 1.0 if cold_len >= max_cold else 0.6
+    # 2. Pattern reliability (more instances = more reliable)
+    pattern_factor = min(times_at_this_length / 8.0, 1.0)
+    # 3. Hitter quality (better hitters rebound more reliably)
+    season_hit_pct = bs.get("season_hit_pct", 0) or 0
+    quality_factor = min(max(season_hit_pct - 0.200, 0) / 0.100, 1.0)
+
+    confidence = _clamp_confidence(
+        0.40 * proximity + 0.35 * pattern_factor + 0.25 * quality_factor
+    )
+
+    at_or_near = "at" if cold_len >= max_cold else "near"
+
+    return SignalResult(
+        signal_type="streak_ceiling_cold",
+        confidence=confidence,
+        headline=f"Cold streak {at_or_near} historical ceiling ({cold_len}G of max {max_cold}G)",
+        reasons=[
+            f"Current hitless streak: {cold_len} games",
+            f"Historical max cold streak: {max_cold} games",
+            f"Times reached {cold_len}+ game cold streak: {times_at_this_length}x (never exceeded {max_cold})",
+            f"Season avg: {season_hit_pct:.3f}",
+        ],
+        interpretation=(
+            f"Player has hit a {cold_len}-game cold streak {times_at_this_length} times "
+            f"and never gone past {max_cold} — historical pattern says rebound is due"
+        ),
+    )
+
+
+def streak_ceiling_hot(
+    ctx: SignalContext, batter_id: int, date: str
+) -> SignalResult | None:
+    """Signal 8: Batter's hot streak is at or near their historical max.
+
+    If a player's longest hit streak is 10 games and they're at game 10,
+    regression says the streak is likely to end. This is a negative signal
+    (slightly lowers expected hit probability).
+
+    Note: This signal has NEGATIVE weight in the composite score — it reduces
+    the daily score rather than boosting it.
+    """
+    bs = _get_batter_stats(ctx, batter_id, date)
+    if not bs:
+        return None
+
+    streak = bs.get("current_streak", 0) or 0
+    if streak <= 0:
+        return None  # Not in a hot streak
+
+    if streak < STREAK_CEILING_HOT_MIN_LEN:
+        return None
+
+    season_pa = bs.get("season_pa", 0) or 0
+    if season_pa < STREAK_CEILING_MIN_SEASON_PA:
+        return None
+
+    history = ctx.batter_streak_history.get(batter_id)
+    if not history:
+        return None
+
+    max_hot = history["max_hot"]
+    if max_hot < STREAK_CEILING_HOT_MIN_LEN:
+        return None
+
+    # Fire if current hot streak is within BUFFER of historical max
+    if streak < max_hot - STREAK_CEILING_BUFFER:
+        return None
+
+    times_at_this_length = history["hot_counts"].get(streak, 0)
+    if times_at_this_length < STREAK_CEILING_MIN_STREAK_INSTANCES:
+        return None
+
+    # Confidence factors
+    proximity = 1.0 if streak >= max_hot else 0.6
+    pattern_factor = min(times_at_this_length / 6.0, 1.0)
+
+    confidence = _clamp_confidence(
+        0.50 * proximity + 0.50 * pattern_factor
+    )
+
+    at_or_near = "at" if streak >= max_hot else "near"
+
+    return SignalResult(
+        signal_type="streak_ceiling_hot",
+        confidence=confidence,
+        headline=f"Hot streak {at_or_near} historical ceiling ({streak}G of max {max_hot}G)",
+        reasons=[
+            f"Current hit streak: {streak} games",
+            f"Historical max hot streak: {max_hot} games",
+            f"Times reached {streak}+ game hit streak: {times_at_this_length}x",
+        ],
+        interpretation=(
+            f"Player's hit streak ({streak}G) is {at_or_near} their historical max "
+            f"of {max_hot}G — regression says the streak is likely to end"
+        ),
+    )
+
+
 # ── Evaluate All Signals ─────────────────────────────────────────────────────
 
 ALL_SIGNAL_FUNCTIONS = [
@@ -576,6 +798,8 @@ ALL_SIGNAL_FUNCTIONS = [
     contact_quality_regression,
     pitch_mix_advantage,
     babip_regression,
+    streak_ceiling_cold,
+    streak_ceiling_hot,
 ]
 
 

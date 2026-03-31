@@ -94,6 +94,13 @@ BABIP_APPROX_HR_RATE = 0.08    # ~8% of hits are HR
 BABIP_APPROX_SO_RATE = 0.22    # ~22% strikeout rate
 BABIP_APPROX_AB_RATIO = 0.88   # AB/PA approximation
 
+# Signal 7: streak_ceiling (cold rebound / hot regression)
+STREAK_CEILING_MIN_SEASON_PA = 80       # Need enough history to trust streak data
+STREAK_CEILING_MIN_STREAK_INSTANCES = 2 # Must have hit this streak length 2+ times
+STREAK_CEILING_COLD_MIN_LEN = 3        # Minimum cold streak to consider
+STREAK_CEILING_HOT_MIN_LEN = 4         # Minimum hot streak to consider
+STREAK_CEILING_BUFFER = 1              # Fire when within 1 game of max (0 = at max only)
+
 # ── Composite Score ──────────────────────────────────────────────────────────
 
 SIGNAL_WEIGHTS = {
@@ -104,6 +111,8 @@ SIGNAL_WEIGHTS = {
     "pitch_mix_advantage": 0.07,
     "babip_regression": 0.05,
     "hr_power_signal": 0.08,
+    "streak_ceiling_cold": 0.09,
+    "streak_ceiling_hot": 0.06,
 }
 
 # Z-score scaling: z of -3 -> 0, z of +3 -> 100

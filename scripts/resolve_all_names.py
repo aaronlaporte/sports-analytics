@@ -32,12 +32,18 @@ def resolve_names():
         pass  # Column already exists
 
     # Get ALL unique player IDs from statcast (batters + pitchers)
-    batter_ids = {r[0] for r in conn.execute(
-        "SELECT DISTINCT batter FROM statcast_staging"
-    ).fetchall()}
-    pitcher_ids = {r[0] for r in conn.execute(
-        "SELECT DISTINCT pitcher FROM statcast_staging"
-    ).fetchall()}
+    batter_ids = set()
+    for r in conn.execute("SELECT DISTINCT batter FROM statcast_staging").fetchall():
+        try:
+            batter_ids.add(int(r[0]))
+        except (TypeError, ValueError):
+            pass
+    pitcher_ids = set()
+    for r in conn.execute("SELECT DISTINCT pitcher FROM statcast_staging").fetchall():
+        try:
+            pitcher_ids.add(int(r[0]))
+        except (TypeError, ValueError):
+            pass
     all_ids = batter_ids | pitcher_ids
 
     # Get existing resolved names

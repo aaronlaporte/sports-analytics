@@ -38,6 +38,7 @@ from mlb_insights.data_pipeline.features import (
     build_batter_features, write_batter_features,
     build_pitcher_features, write_pitcher_features,
     build_matchup_features, write_matchup_features,
+    build_batter_vs_team, write_batter_vs_team,
 )
 from mlb_insights.signal_engine.calibration import (
     load_calibration, train_calibration, calibrate_single,
@@ -218,6 +219,8 @@ def run_single_date(
             write_pitcher_features(conn, pitcher_df)
             matchup_df = build_matchup_features(conn, start_date=MLB_SEASON_START_2024)
             write_matchup_features(conn, matchup_df)
+            bvt_df = build_batter_vs_team(conn, start_date=MLB_SEASON_START_2024)
+            write_batter_vs_team(conn, bvt_df)
         except Exception as exc:
             logger.error("Feature build failed: %s", exc)
     else:
@@ -406,6 +409,8 @@ def run_backfill(
     write_pitcher_features(conn, pitcher_df)
     matchup_df = build_matchup_features(conn, start_date=start_date)
     write_matchup_features(conn, matchup_df)
+    bvt_df = build_batter_vs_team(conn, start_date=start_date)
+    write_batter_vs_team(conn, bvt_df)
 
     # Load/train calibration
     print("\n[2/5] Loading calibration model ...")

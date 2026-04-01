@@ -133,6 +133,21 @@ def build_batter_features(conn: sqlite3.Connection, start_date: str = "2024-03-2
     df = df.dropna(subset=["batter"])
     df = _add_flags(df)
 
+    # Derive batter team: if batting in Top inning -> away_team, else home_team
+    if "inning_topbot" in df.columns and "home_team" in df.columns:
+        df["batter_team"] = df.apply(
+            lambda r: r["away_team"] if r.get("inning_topbot") == "Top" else r["home_team"],
+            axis=1,
+        )
+        # Also derive opposing team
+        df["opp_team"] = df.apply(
+            lambda r: r["home_team"] if r.get("inning_topbot") == "Top" else r["away_team"],
+            axis=1,
+        )
+    else:
+        df["batter_team"] = None
+        df["opp_team"] = None
+
     # Daily aggregation per batter
     batter_daily = (
         df.groupby(["game_date", "batter"])
@@ -145,6 +160,7 @@ def build_batter_features(conn: sqlite3.Connection, start_date: str = "2024-03-2
             hbp=("hbp_flag", "sum"),
             so=("so_flag", "sum"),
             tb=("tb", "sum"),
+            team=("batter_team", "first"),
         )
         .reset_index()
     )
@@ -216,8 +232,9 @@ def write_batter_features(conn: sqlite3.Connection, df: pd.DataFrame):
     conn.execute("DELETE FROM batter_stats")
     rows = []
     for _, r in df.iterrows():
+        team_val = r.get("team") if pd.notna(r.get("team")) else None
         rows.append((
-            str(r["game_date"])[:10], int(r["batter_id"]), None, None,
+            str(r["game_date"])[:10], int(r["batter_id"]), None, team_val,
             int(r.get("pa", 0)), int(r.get("ab", 0)), int(r.get("hits", 0)),
             int(r.get("hr", 0)), int(r.get("bb", 0)), int(r.get("so", 0)),
             float(r.get("avg", 0)), float(r.get("obp", 0)), float(r.get("slg", 0)),
@@ -418,3 +435,96 @@ def write_matchup_features(conn: sqlite3.Connection, df: pd.DataFrame):
     """, rows)
     conn.commit()
     logger.info("Wrote %d matchup_stats rows.", len(rows))
+
+
+# ── Batter vs Team Splits ───────────────────────────────────────────────────
+
+def build_batter_vs_team(conn: sqlite3.Connection, start_date: str = "2024-03-20") -> pd.DataFrame:
+    """Build batter-vs-opposing-team split stats from statcast.
+
+    Aggregates PA, AB, H, 1B, 2B, 3B, HR, BB, K, games for every
+    (batter, opposing_team) combination.
+
+    Returns:
+        DataFrame with one row per (batter, opp_team).
+    """
+    df = pd.read_sql(
+        "SELECT * FROM statcast_staging WHERE game_date >= ? AND events IS NOT NULL",
+        conn, params=(start_date,),
+    )
+    if df.empty:
+        return pd.DataFrame()
+
+    df = df[df["events"].isin(VALID_EVENTS)].copy()
+    for col in ("batter",):
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+    df = df.dropna(subset=["batter"])
+    df = _add_flags(df)
+
+    # Derive opposing team
+    if "inning_topbot" in df.columns and "home_team" in df.columns:
+        df["opp_team"] = df.apply(
+            lambda r: r["home_team"] if r.get("inning_topbot") == "Top" else r["away_team"],
+            axis=1,
+        )
+    else:
+        logger.warning("Cannot derive opp_team — missing inning_topbot or home_team columns.")
+        return pd.DataFrame()
+
+    # Add hit-type flags
+    df["single_flag"] = (df["events"] == "single").astype(int)
+    df["double_flag"] = (df["events"] == "double").astype(int)
+    df["triple_flag"] = (df["events"] == "triple").astype(int)
+
+    m = (
+        df.groupby(["batter", "opp_team"])
+        .agg(
+            games=("game_date", "nunique"),
+            pa=("events", "count"),
+            ab=("ab_flag", "sum"),
+            hits=("hit_flag", "sum"),
+            singles=("single_flag", "sum"),
+            doubles=("double_flag", "sum"),
+            triples=("triple_flag", "sum"),
+            hr=("hr_flag", "sum"),
+            bb=("bb_flag", "sum"),
+            so=("so_flag", "sum"),
+            tb=("tb", "sum"),
+            hbp=("hbp_flag", "sum"),
+        )
+        .reset_index()
+    )
+    m["avg"] = (m["hits"] / m["ab"]).round(3).fillna(0)
+    m["obp"] = ((m["hits"] + m["bb"] + m["hbp"]) / (m["ab"] + m["bb"] + m["hbp"])).round(3).fillna(0)
+    m["slg"] = (m["tb"] / m["ab"]).round(3).fillna(0)
+
+    logger.info("Built batter-vs-team splits: %d rows for %d batters.", len(m), m["batter"].nunique())
+    return m
+
+
+def write_batter_vs_team(conn: sqlite3.Connection, df: pd.DataFrame):
+    """Write batter-vs-team split stats to the batter_vs_team table."""
+    if df.empty:
+        return
+
+    conn.execute("DELETE FROM batter_vs_team")
+    rows = []
+    for _, r in df.iterrows():
+        rows.append((
+            int(r["batter"]), str(r["opp_team"]),
+            int(r["games"]), int(r["pa"]), int(r["ab"]),
+            int(r["hits"]), int(r["singles"]), int(r["doubles"]),
+            int(r["triples"]), int(r["hr"]),
+            int(r["bb"]), int(r["so"]),
+            float(r["avg"]), float(r["obp"]), float(r["slg"]),
+            None,  # last_updated
+        ))
+
+    conn.executemany("""
+        INSERT OR REPLACE INTO batter_vs_team
+            (batter_id, opp_team, games, pa, ab, hits, singles, doubles,
+             triples, hr, bb, so, avg, obp, slg, last_updated)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, rows)
+    conn.commit()
+    logger.info("Wrote %d batter_vs_team rows.", len(rows))

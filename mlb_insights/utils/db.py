@@ -74,6 +74,28 @@ CREATE TABLE IF NOT EXISTS park_factors (
 );
 """
 
+BATTER_VS_TEAM_DDL = """
+CREATE TABLE IF NOT EXISTS batter_vs_team (
+    batter_id     INTEGER,
+    opp_team      TEXT,
+    games         INTEGER,
+    pa            INTEGER,
+    ab            INTEGER,
+    hits          INTEGER,
+    singles       INTEGER,
+    doubles       INTEGER,
+    triples       INTEGER,
+    hr            INTEGER,
+    bb            INTEGER,
+    so            INTEGER,
+    avg           REAL,
+    obp           REAL,
+    slg           REAL,
+    last_updated  TEXT,
+    PRIMARY KEY (batter_id, opp_team)
+);
+"""
+
 
 def get_connection(readonly: bool = False) -> sqlite3.Connection:
     """Return a sqlite3 connection to the MLB database.
@@ -129,4 +151,5 @@ def ensure_tables():
         conn.executescript(CALIBRATION_SUMMARY_DDL)
         conn.executescript(HR_FEATURES_DDL)
         conn.executescript(PARK_FACTORS_DDL)
+        conn.executescript(BATTER_VS_TEAM_DDL)
     logger.info("Phase 3 tables verified.")

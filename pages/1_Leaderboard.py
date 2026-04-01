@@ -332,6 +332,7 @@ with tab_hits:
     base_cols = [
         "daily_rank",
         "player_name",
+        "team",
         "daily_score",
         "p_1hit",
         "p_2hit",
@@ -341,7 +342,12 @@ with tab_hits:
         "top_reason",
     ]
 
+    # Ensure team column exists (may be missing in older data)
+    if "team" not in lb.columns:
+        lb["team"] = None
+
     display_df = lb[base_cols].copy()
+    display_df["team"] = display_df["team"].fillna("--")
 
     # Merge actuals if available
     if has_actuals:
@@ -355,6 +361,7 @@ with tab_hits:
     display_col_names = [
         "Rank",
         "Player",
+        "Team",
         "Score",
         "P(1+ Hit)",
         "P(2+ Hit)",
@@ -505,14 +512,21 @@ with tab_hr:
             ).drop(columns=["player_id"], errors="ignore")
 
         # Build display columns
-        display_cols = ["rank", "player_name", "p_hr", "barrel_rate", "avg_exit_velo",
-                        "park_factor", "pitcher_hr_vuln"]
+        display_cols = ["rank", "player_name"]
+        col_names = ["Rank", "Player"]
+
+        if "team" in hr_display.columns:
+            hr_display["team"] = hr_display["team"].fillna("--")
+            display_cols.append("team")
+            col_names.append("Team")
+
+        display_cols += ["p_hr", "barrel_rate", "avg_exit_velo",
+                         "park_factor", "pitcher_hr_vuln"]
+        col_names += ["P(HR)", "Barrel Rate", "Avg Exit Velo",
+                      "Park Factor", "Pitcher HR Vuln"]
+
         if "opp_pitcher" in hr_display.columns:
             display_cols.append("opp_pitcher")
-
-        col_names = ["Rank", "Player", "P(HR)", "Barrel Rate", "Avg Exit Velo",
-                     "Park Factor", "Pitcher HR Vuln"]
-        if "opp_pitcher" in hr_display.columns:
             col_names.append("Opp Pitcher")
 
         has_hr_actuals = "actual_hr_" in hr_display.columns

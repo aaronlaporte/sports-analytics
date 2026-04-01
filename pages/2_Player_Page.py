@@ -28,7 +28,7 @@ def get_all_players():
     """Return all players from lookup table, sorted by name."""
     conn = get_connection()
     df = pd.read_sql(
-        "SELECT mlbam_id, player_name FROM player_lookup ORDER BY player_name", conn
+        "SELECT mlbam_id, player_name, current_team FROM player_lookup ORDER BY player_name", conn
     )
     conn.close()
     return df
@@ -195,7 +195,17 @@ lb_history = get_player_leaderboard_history(player_id, d_start, d_end)
 
 # ── Player header ────────────────────────────────────────────────────────────
 
-st.title(selected_player.title())
+# Get team from player_lookup
+player_team = None
+if "current_team" in players_df.columns:
+    team_row = players_df[players_df["mlbam_id"] == player_id]
+    if not team_row.empty and pd.notna(team_row.iloc[0].get("current_team")):
+        player_team = team_row.iloc[0]["current_team"]
+
+if player_team:
+    st.title(f"{selected_player.title()} — {player_team}")
+else:
+    st.title(selected_player.title())
 
 # Always use batter_stats as source of truth for current form stats (most up to date).
 # Use page_data/lb_history only for daily score and rank.

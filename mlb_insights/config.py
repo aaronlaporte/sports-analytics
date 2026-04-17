@@ -68,6 +68,9 @@ COLD_STREAK_GAP_SCALE = 0.200
 # Signal 3: pitcher_vulnerability
 PITCHER_VULN_PERCENTILE = 0.75     # Top 25% most hittable
 PITCHER_VULN_RATE_SCALE = 0.050
+PITCHER_VULN_RECENT_STARTS = 5          # Number of recent starts to consider
+PITCHER_VULN_MIN_RECENT_STARTS = 3      # Minimum recent starts to use blended avg
+PITCHER_VULN_RECENT_WEIGHT = 0.60       # Weight on recent avg (season gets 1 - this)
 
 # Signal 4: contact_quality_regression
 CONTACT_QUALITY_MIN_SEASON_PA = 100
@@ -94,12 +97,23 @@ BABIP_APPROX_HR_RATE = 0.08    # ~8% of hits are HR
 BABIP_APPROX_SO_RATE = 0.22    # ~22% strikeout rate
 BABIP_APPROX_AB_RATIO = 0.88   # AB/PA approximation
 
-# Signal 7: streak_ceiling (cold rebound / hot regression)
+# Signal 7: day_night_advantage
+DAY_NIGHT_MIN_PA = 30
+DAY_NIGHT_MIN_ADVANTAGE = 0.040
+DAY_NIGHT_ADV_SCALE = 0.100
+
+# Signal 8: streak_ceiling (cold rebound / hot regression)
 STREAK_CEILING_MIN_SEASON_PA = 80       # Need enough history to trust streak data
 STREAK_CEILING_MIN_STREAK_INSTANCES = 2 # Must have hit this streak length 2+ times
 STREAK_CEILING_COLD_MIN_LEN = 3        # Minimum cold streak to consider
 STREAK_CEILING_HOT_MIN_LEN = 4         # Minimum hot streak to consider
 STREAK_CEILING_BUFFER = 1              # Fire when within 1 game of max (0 = at max only)
+
+# ── Minimum Signal Gate ─────────────────────────────────────────────────────
+# Suppress noise from single weak signals: boost only applies when 2+ signals
+# fire, OR a single signal has confidence >= this threshold.
+MIN_SIGNALS_FOR_BOOST = 2
+MIN_SINGLE_SIGNAL_CONFIDENCE = 0.50
 
 # ── Composite Score ──────────────────────────────────────────────────────────
 
@@ -113,6 +127,7 @@ SIGNAL_WEIGHTS = {
     "hr_power_signal": 0.08,
     "streak_ceiling_cold": 0.09,
     "streak_ceiling_hot": 0.06,
+    "day_night_advantage": 0.05,
 }
 
 # Z-score scaling: z of -3 -> 0, z of +3 -> 100
@@ -129,8 +144,18 @@ LEADERBOARD_TOP_N = 50
 
 BRIER_ROLLING_WINDOWS = [7, 14, 30, 90]
 
+CALIBRATION_MAX_AGE_DAYS = 14
+CALIBRATION_BRIER_RETRAIN_THRESHOLD = 0.22
+
 # ── Launch Speed Cache ───────────────────────────────────────────────────────
 
 LAUNCH_SPEED_N_GAMES = 10
 LAUNCH_SPEED_BATTED_BALLS_PER_GAME = 4   # ~3-4 batted balls per game
 LAUNCH_SPEED_MIN_SAMPLES = 5
+
+# ── Season Weight Cap ───────────────────────────────────────────────────────
+# Dynamic cap on season-stats weight in probability model (by calendar month)
+# April=4 -> base cap, increases monthly through the season
+SEASON_WEIGHT_BASE = 0.50
+SEASON_WEIGHT_MONTHLY_STEP = 0.05
+SEASON_WEIGHT_MAX_CAP = 0.75

@@ -1,5 +1,5 @@
 """
-mlb_insights/signal_engine/signals.py -- All 6 signal definitions.
+mlb_insights/signal_engine/signals.py -- All signal definitions.
 
 Each signal function takes context dicts and returns a SignalResult (or None
 if the signal does not fire).  evaluate_all_signals() runs them all for a
@@ -23,6 +23,8 @@ from mlb_insights.config import (
     COLD_STREAK_MAX_STREAK, COLD_STREAK_MIN_SEASON_AVG, COLD_STREAK_MIN_SEASON_PA,
     COLD_STREAK_MIN_EXIT_VELO, COLD_STREAK_VELO_SCALE, COLD_STREAK_GAP_SCALE,
     PITCHER_VULN_PERCENTILE, PITCHER_VULN_RATE_SCALE,
+    PITCHER_VULN_RECENT_STARTS, PITCHER_VULN_MIN_RECENT_STARTS,
+    PITCHER_VULN_RECENT_WEIGHT,
     CONTACT_QUALITY_MIN_SEASON_PA, CONTACT_QUALITY_MIN_SEASON_AVG,
     CONTACT_QUALITY_MIN_GAP, CONTACT_QUALITY_MIN_EXIT_VELO,
     CONTACT_QUALITY_GAP_SCALE, CONTACT_QUALITY_VELO_SCALE,
@@ -37,6 +39,7 @@ from mlb_insights.config import (
     MIN_PITCHER_BF,
     LAUNCH_SPEED_N_GAMES, LAUNCH_SPEED_BATTED_BALLS_PER_GAME,
     LAUNCH_SPEED_MIN_SAMPLES,
+    DAY_NIGHT_MIN_PA, DAY_NIGHT_MIN_ADVANTAGE, DAY_NIGHT_ADV_SCALE,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +75,7 @@ class SignalContext:
     batter_stats: dict          # (batter_id, date) -> row dict
     batter_dates: dict          # batter_id -> sorted list of dates
     pitcher_career: dict        # (pitcher_id, date) -> cumulative {bf, ha}
+    pitcher_dates: dict         # pitcher_id -> sorted list of game dates
     league_avg_hit_rate: float
     batter_launch_speeds: dict  # batter_id -> [(date, speed), ...]
     batter_vs_hand: dict        # (batter_id, hand) -> {pa, hits, avg}
@@ -79,6 +83,10 @@ class SignalContext:
     batter_streak_history: dict = field(default_factory=dict)
     # batter_id -> {max_cold: int, max_hot: int,
     #               cold_counts: {len: count}, hot_counts: {len: count}}
+    batter_day_night_splits: dict = field(default_factory=dict)
+    # batter_id -> {"D": {pa, hits, avg}, "N": {pa, hits, avg}}
+    game_day_night: dict = field(default_factory=dict)
+    # game_pk -> "D" or "N"
 
 
 def build_signal_context(conn: sqlite3.Connection) -> SignalContext:
@@ -121,6 +129,7 @@ def build_signal_context(conn: sqlite3.Connection) -> SignalContext:
     pitcher_rows = cur.fetchall()
     career = defaultdict(lambda: {"bf": 0, "ha": 0})
     pitcher_career = {}
+    pitcher_dates = defaultdict(list)
     total_bf = 0
     total_ha = 0
     for r in pitcher_rows:
@@ -131,6 +140,7 @@ def build_signal_context(conn: sqlite3.Connection) -> SignalContext:
         career[pid]["bf"] += bf
         career[pid]["ha"] += ha
         pitcher_career[(pid, d)] = dict(career[pid])
+        pitcher_dates[pid].append(d)
         total_bf += bf
         total_ha += ha
 
@@ -180,6 +190,46 @@ def build_signal_context(conn: sqlite3.Connection) -> SignalContext:
             "pa": pa, "hits": hits, "avg": hits / pa if pa > 0 else 0.0,
         }
 
+    # Day/night splits (requires day_night column in statcast_staging)
+    logger.info("Loading day/night split data ...")
+    batter_day_night_splits = {}
+    game_day_night = {}
+    try:
+        cur.execute("""
+            SELECT batter, day_night,
+                   COUNT(*) as pa,
+                   SUM(CASE WHEN events IN ('single','double','triple','home_run') THEN 1 ELSE 0 END) as hits
+            FROM statcast_staging
+            WHERE events IS NOT NULL AND day_night IS NOT NULL
+            GROUP BY batter, day_night
+        """)
+        for r in cur.fetchall():
+            bid = r["batter"]
+            dn = r["day_night"]  # "D" or "N"
+            if bid not in batter_day_night_splits:
+                batter_day_night_splits[bid] = {}
+            pa = r["pa"]
+            hits = r["hits"]
+            batter_day_night_splits[bid][dn] = {
+                "pa": pa, "hits": hits, "avg": hits / pa if pa > 0 else 0.0,
+            }
+
+        # Map game_pk -> day/night for current-game lookup
+        cur.execute("""
+            SELECT DISTINCT game_pk, day_night
+            FROM statcast_staging
+            WHERE day_night IS NOT NULL
+        """)
+        for r in cur.fetchall():
+            game_day_night[r["game_pk"]] = r["day_night"]
+
+        if batter_day_night_splits:
+            logger.info("Loaded day/night splits for %d batters.", len(batter_day_night_splits))
+        else:
+            logger.debug("day_night column exists but no data found -- day_night_advantage signal will be inactive.")
+    except Exception:
+        logger.debug("day_night column not present in statcast_staging -- day_night_advantage signal will be inactive until data is available.")
+
     # Streak history: compute max cold/hot streaks and frequency per batter
     logger.info("Computing streak ceiling history ...")
     batter_streak_history = _compute_streak_history(batter_stats, batter_dates)
@@ -194,11 +244,14 @@ def build_signal_context(conn: sqlite3.Connection) -> SignalContext:
         batter_stats=batter_stats,
         batter_dates=batter_dates,
         pitcher_career=pitcher_career,
+        pitcher_dates=dict(pitcher_dates),
         league_avg_hit_rate=league_avg,
         batter_launch_speeds=batter_launch_speeds,
         batter_vs_hand=batter_vs_hand,
         pitcher_handedness=pitcher_handedness,
         batter_streak_history=batter_streak_history,
+        batter_day_night_splits=batter_day_night_splits,
+        game_day_night=game_day_night,
     )
 
 
@@ -236,13 +289,58 @@ def _get_avg_launch_speed(ctx: SignalContext, batter_id: int, date: str) -> floa
 def _get_pitcher_vulnerability(ctx: SignalContext, date: str) -> dict:
     """Compute pitcher vulnerability rankings for a date.
 
+    Blends season-long avg_against with recent-starts avg_against (last
+    PITCHER_VULN_RECENT_STARTS games) to weight recent form more heavily.
+    Falls back to season-only when fewer than PITCHER_VULN_MIN_RECENT_STARTS
+    recent games are available.
+
     Returns:
-        Dict of pitcher_id -> (avg_against, percentile).
+        Dict of pitcher_id -> (blended_avg_against, percentile).
     """
     pitcher_avgs = {}
     for (pid, d), stats in ctx.pitcher_career.items():
         if d <= date and stats["bf"] >= MIN_PITCHER_BF:
-            pitcher_avgs[pid] = stats["ha"] / stats["bf"]
+            season_avg = stats["ha"] / stats["bf"]
+
+            # Compute recent avg from last N starts on or before date
+            dates_for_pitcher = ctx.pitcher_dates.get(pid, [])
+            recent_dates = [rd for rd in dates_for_pitcher if rd <= date]
+            recent_dates = recent_dates[-PITCHER_VULN_RECENT_STARTS:]
+
+            if len(recent_dates) >= PITCHER_VULN_MIN_RECENT_STARTS and len(recent_dates) >= 2:
+                # Recent window: delta between cumulative at last recent date
+                # and cumulative just before the first recent date
+                first_recent = recent_dates[0]
+                last_recent = recent_dates[-1]
+
+                last_stats = ctx.pitcher_career.get((pid, last_recent))
+
+                # Find cumulative stats just before the recent window
+                all_dates = ctx.pitcher_dates.get(pid, [])
+                idx = all_dates.index(first_recent) if first_recent in all_dates else -1
+                if idx > 0:
+                    before_date = all_dates[idx - 1]
+                    before_stats = ctx.pitcher_career.get((pid, before_date), {"bf": 0, "ha": 0})
+                else:
+                    before_stats = {"bf": 0, "ha": 0}
+
+                if last_stats:
+                    recent_bf = last_stats["bf"] - before_stats["bf"]
+                    recent_ha = last_stats["ha"] - before_stats["ha"]
+                    if recent_bf > 0:
+                        recent_avg = recent_ha / recent_bf
+                        blended = (
+                            (1 - PITCHER_VULN_RECENT_WEIGHT) * season_avg
+                            + PITCHER_VULN_RECENT_WEIGHT * recent_avg
+                        )
+                        pitcher_avgs[pid] = blended
+                    else:
+                        pitcher_avgs[pid] = season_avg
+                else:
+                    pitcher_avgs[pid] = season_avg
+            else:
+                # Not enough recent starts -- use season-only
+                pitcher_avgs[pid] = season_avg
 
     if not pitcher_avgs:
         return {}
@@ -789,6 +887,103 @@ def streak_ceiling_hot(
     )
 
 
+# ── Day/Night Advantage ────────────────────────────────────────────────────
+
+
+def day_night_advantage(
+    ctx: SignalContext,
+    batter_id: int,
+    date: str,
+    game_pk: int | None = None,
+) -> SignalResult | None:
+    """Signal 9: Batter has a significant day/night batting average split.
+
+    Fires when:
+    - The batter has 30+ PA in both day and night games
+    - There is a 40+ point (.040+) advantage in one slot
+    - The current game matches the advantageous slot
+
+    If day/night data is not available in statcast_staging, returns None
+    gracefully so the signal auto-activates once the data exists.
+    """
+    if not ctx.batter_day_night_splits:
+        logger.debug(
+            "day_night_advantage: no day/night split data loaded -- signal inactive."
+        )
+        return None
+
+    splits = ctx.batter_day_night_splits.get(batter_id)
+    if not splits:
+        return None
+
+    day_split = splits.get("D")
+    night_split = splits.get("N")
+    if not day_split or not night_split:
+        return None
+
+    # Need minimum PA in each slot
+    if day_split["pa"] < DAY_NIGHT_MIN_PA or night_split["pa"] < DAY_NIGHT_MIN_PA:
+        return None
+
+    day_avg = day_split["avg"]
+    night_avg = night_split["avg"]
+
+    # Determine which slot has the advantage and how large
+    if day_avg - night_avg >= DAY_NIGHT_MIN_ADVANTAGE:
+        advantaged_slot = "D"
+        advantage = day_avg - night_avg
+        adv_avg = day_avg
+        adv_pa = day_split["pa"]
+        slot_label = "day"
+        other_label = "night"
+        other_avg = night_avg
+    elif night_avg - day_avg >= DAY_NIGHT_MIN_ADVANTAGE:
+        advantaged_slot = "N"
+        advantage = night_avg - day_avg
+        adv_avg = night_avg
+        adv_pa = night_split["pa"]
+        slot_label = "night"
+        other_label = "day"
+        other_avg = day_avg
+    else:
+        return None  # No significant split
+
+    # Determine current game's day/night slot
+    current_slot = None
+    if game_pk is not None:
+        current_slot = ctx.game_day_night.get(game_pk)
+
+    if current_slot is None:
+        # Cannot determine the current game's time slot
+        logger.debug(
+            "day_night_advantage: cannot determine day/night for game_pk=%s -- skipping.",
+            game_pk,
+        )
+        return None
+
+    # Only fire if the current game matches the advantaged slot
+    if current_slot != advantaged_slot:
+        return None
+
+    # Confidence based on magnitude of advantage
+    adv_factor = min(advantage / DAY_NIGHT_ADV_SCALE, 1.0)
+    sample_factor = min(adv_pa / 100.0, 1.0)
+    confidence = _clamp_confidence(0.6 * adv_factor + 0.4 * sample_factor)
+
+    return SignalResult(
+        signal_type="day_night_advantage",
+        confidence=confidence,
+        headline=f"Strong {slot_label}-game hitter ({adv_avg:.3f} {slot_label} vs {other_avg:.3f} {other_label})",
+        reasons=[
+            f"Day avg: {day_avg:.3f} ({day_split['pa']} PA)",
+            f"Night avg: {night_avg:.3f} ({night_split['pa']} PA)",
+            f"Split advantage: +{advantage:.3f} in {slot_label} games",
+            f"Today's game: {slot_label}",
+        ],
+        interpretation=f"Batter hits significantly better in {slot_label} games and today is a {slot_label} game",
+    )
+
+
 # ── Evaluate All Signals ─────────────────────────────────────────────────────
 
 ALL_SIGNAL_FUNCTIONS = [
@@ -800,6 +995,7 @@ ALL_SIGNAL_FUNCTIONS = [
     babip_regression,
     streak_ceiling_cold,
     streak_ceiling_hot,
+    # day_night_advantage handled separately (needs game_pk)
 ]
 
 
@@ -809,8 +1005,9 @@ def evaluate_all_signals(
     date: str,
     pitchers_faced: set[int] | None = None,
     pitcher_vuln: dict | None = None,
+    game_pk: int | None = None,
 ) -> list[SignalResult]:
-    """Evaluate all 6 signals for a single batter on a given date.
+    """Evaluate all signals for a single batter on a given date.
 
     Args:
         ctx: Pre-built SignalContext.
@@ -818,6 +1015,7 @@ def evaluate_all_signals(
         date: Game date string (YYYY-MM-DD).
         pitchers_faced: Set of pitcher IDs the batter faced on this date.
         pitcher_vuln: Pre-computed pitcher vulnerability dict for this date.
+        game_pk: Game primary key, used for day/night slot lookup.
 
     Returns:
         List of SignalResult objects for signals that fired.
@@ -847,6 +1045,17 @@ def evaluate_all_signals(
     except Exception as exc:
         logger.warning(
             "Signal pitcher_vulnerability failed for batter %d on %s: %s",
+            batter_id, date, exc,
+        )
+
+    # Day/night advantage (needs game_pk)
+    try:
+        result = day_night_advantage(ctx, batter_id, date, game_pk=game_pk)
+        if result is not None:
+            fired.append(result)
+    except Exception as exc:
+        logger.warning(
+            "Signal day_night_advantage failed for batter %d on %s: %s",
             batter_id, date, exc,
         )
 

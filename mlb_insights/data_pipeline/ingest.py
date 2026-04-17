@@ -70,6 +70,7 @@ def pull_statcast(date_str: str, conn: sqlite3.Connection) -> int:
         "estimated_ba_using_speedangle",
         "stand", "p_throws", "home_team", "away_team",
         "inning_topbot", "at_bat_number", "pitch_number",
+        "day_night",
     ]
     available = [c for c in keep_cols if c in df.columns]
     df = df[available].copy()

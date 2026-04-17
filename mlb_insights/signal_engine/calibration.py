@@ -13,7 +13,12 @@ from pathlib import Path
 
 import numpy as np
 
-from mlb_insights.config import CALIBRATION_MODEL_DIR, CALIBRATION_TRAIN_CUTOFF
+from mlb_insights.config import (
+    CALIBRATION_MODEL_DIR,
+    CALIBRATION_TRAIN_CUTOFF,
+    CALIBRATION_MAX_AGE_DAYS,
+    CALIBRATION_BRIER_RETRAIN_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +140,55 @@ def load_calibration() -> CalibrationModels | None:
 
     logger.info("Calibration models loaded from %s", path)
     return models
+
+
+def calibration_needs_retrain(
+    conn: sqlite3.Connection,
+    max_age_days: int = CALIBRATION_MAX_AGE_DAYS,
+    brier_threshold: float = CALIBRATION_BRIER_RETRAIN_THRESHOLD,
+) -> bool:
+    """Check whether calibration model should be retrained.
+
+    Returns True if the pickle is older than *max_age_days* or the most
+    recent 7-day brier_1hit score from calibration_summary exceeds
+    *brier_threshold*.
+    """
+    import os
+    from datetime import datetime, timedelta
+
+    # 1. Check model age
+    path = _model_path()
+    if path.exists():
+        mtime = datetime.fromtimestamp(os.path.getmtime(path))
+        age = datetime.now() - mtime
+        if age > timedelta(days=max_age_days):
+            logger.info(
+                "Calibration model is %d days old (max %d). Retrain needed.",
+                age.days, max_age_days,
+            )
+            return True
+
+    # 2. Check recent Brier score
+    try:
+        row = conn.execute("""
+            SELECT brier_1hit
+            FROM calibration_summary
+            WHERE window_days = 7
+            ORDER BY as_of_date DESC
+            LIMIT 1
+        """).fetchone()
+        if row is not None:
+            recent_brier = row["brier_1hit"] if isinstance(row, sqlite3.Row) else row[0]
+            if recent_brier > brier_threshold:
+                logger.info(
+                    "Recent 7-day brier_1hit=%.4f exceeds threshold %.4f. Retrain needed.",
+                    recent_brier, brier_threshold,
+                )
+                return True
+    except Exception as exc:
+        logger.warning("Could not check calibration_summary: %s", exc)
+
+    return False
 
 
 def calibrate(

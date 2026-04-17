@@ -19,19 +19,23 @@ Pipeline steps:
 """
 
 import argparse
+import json
 import logging
 import sqlite3
 import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 
 from mlb_insights.config import (
     DB_PATH, LEADERBOARD_TOP_N,
     MLB_SEASON_START_2024,
+    SEASON_WEIGHT_BASE, SEASON_WEIGHT_MONTHLY_STEP, SEASON_WEIGHT_MAX_CAP,
 )
+from mlb_insights.signal_engine.weight_tuner import TUNED_WEIGHTS_PATH, TUNED_THRESHOLDS_PATH
 from mlb_insights.utils.db import get_connection, ensure_tables
 from mlb_insights.data_pipeline.ingest import pull_statcast, pull_schedule
 from mlb_insights.data_pipeline.features import (
@@ -42,6 +46,7 @@ from mlb_insights.data_pipeline.features import (
 )
 from mlb_insights.signal_engine.calibration import (
     load_calibration, train_calibration, calibrate_single,
+    calibration_needs_retrain,
 )
 from mlb_insights.signal_engine.signals import (
     build_signal_context, evaluate_all_signals, load_batter_date_pitchers,
@@ -124,8 +129,11 @@ def _compute_player_probabilities(
     recent_ab_approx = 5 * _AVG_PA_PER_GAME * 0.88  # ~16.7 AB in 5 games
     recent_hit_rate = hits_pg_5 / recent_ab_approx if recent_ab_approx > 0 else 0
 
-    # Weight: season gets more weight as sample grows, recent form adds volatility
-    season_weight = min(season_pa / 200.0, 0.70)  # caps at 70% weight
+    # Dynamic season weight cap: trust season stats more as sample grows
+    month = datetime.strptime(date_str, "%Y-%m-%d").month
+    # April=0.50, May=0.55, June=0.60, ... Aug+=0.75
+    season_cap = min(SEASON_WEIGHT_BASE + max(month - 4, 0) * SEASON_WEIGHT_MONTHLY_STEP, SEASON_WEIGHT_MAX_CAP)
+    season_weight = min(season_pa / 200.0, season_cap)
     recent_weight = 1.0 - season_weight
 
     # Blended per-AB hit probability
@@ -188,6 +196,28 @@ def run_single_date(
     print(f"  MLB INSIGHTS PIPELINE -- {date_str}")
     print(f"{'='*60}")
 
+    # Load tuned signal weights if available
+    import mlb_insights.config as _cfg
+    if TUNED_WEIGHTS_PATH.exists():
+        try:
+            with open(TUNED_WEIGHTS_PATH) as _f:
+                _tuned = json.load(_f)
+            _cfg.SIGNAL_WEIGHTS.update(_tuned)
+            logger.info("Loaded tuned signal weights from %s", TUNED_WEIGHTS_PATH)
+        except Exception as exc:
+            logger.warning("Failed to load tuned weights: %s", exc)
+
+    # Load tuned thresholds if available
+    if TUNED_THRESHOLDS_PATH.exists():
+        try:
+            with open(TUNED_THRESHOLDS_PATH) as _f:
+                _thresholds = json.load(_f)
+            if "babip_min_gap" in _thresholds:
+                _cfg.BABIP_MIN_GAP = _thresholds["babip_min_gap"]
+                logger.info("Loaded tuned BABIP threshold: %.3f", _cfg.BABIP_MIN_GAP)
+        except Exception as exc:
+            logger.warning("Failed to load tuned thresholds: %s", exc)
+
     # Step 1: Score yesterday
     if not skip_tracking:
         print("\n[1/8] Scoring yesterday's predictions ...")
@@ -242,21 +272,24 @@ def run_single_date(
     except Exception as exc:
         logger.error("HR feature computation failed: %s", exc)
 
-    # Step 4: Load calibration model
+    # Step 4: Load calibration model (retrain if stale or degraded)
     print("\n[4/8] Loading calibration model ...")
     models = None
     try:
         models = load_calibration()
     except Exception as exc:
         logger.error("Calibration load failed: %s", exc)
-    if models is None:
-        print("  No calibration model found. Training from scratch ...")
+    if models is None or calibration_needs_retrain(conn):
+        reason = "not found" if models is None else "stale or degraded"
+        print(f"  Calibration model {reason}. Training ...")
         try:
             models = train_calibration(conn)
         except Exception as exc:
             logger.error("Calibration training failed: %s", exc)
-            print("  FATAL: Cannot proceed without calibration. Exiting.")
-            return
+            if models is None:
+                print("  FATAL: Cannot proceed without calibration. Exiting.")
+                return
+            print("  Retrain failed; continuing with existing model.")
 
     # Step 5: Evaluate signals
     print("\n[5/8] Evaluating signals ...")
@@ -349,6 +382,46 @@ def run_single_date(
 
     signal_count = sum(p.active_signal_count for p in all_scored)
     print(f"  {signal_count} signals fired across {len(all_scored)} batters.")
+
+    # Step 6b: Filter to players with a game on the prediction target date
+    prediction_target = (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    print(f"\n[6b/8] Filtering to players with games on {prediction_target} ...")
+    games = pull_schedule(prediction_target, conn)
+    if games:
+        teams_playing = set()
+        for g in games:
+            if g.get("home_team"):
+                teams_playing.add(g["home_team"])
+            if g.get("away_team"):
+                teams_playing.add(g["away_team"])
+
+        # Build batter -> team map from most recent batter_stats
+        team_map = {}
+        for row in conn.execute(
+            "SELECT batter_id, team FROM batter_stats "
+            "WHERE game_date = ? AND team IS NOT NULL", (date_str,)
+        ).fetchall():
+            team_map[row["batter_id"]] = row["team"]
+        # Fallback: check most recent date for batters not in date_str
+        if not team_map:
+            for row in conn.execute(
+                "SELECT batter_id, team FROM batter_stats "
+                "WHERE game_date = (SELECT MAX(game_date) FROM batter_stats WHERE game_date <= ?) "
+                "AND team IS NOT NULL", (date_str,)
+            ).fetchall():
+                team_map.setdefault(row["batter_id"], row["team"])
+
+        pre_filter = len(all_scored)
+        all_scored = [
+            p for p in all_scored
+            if team_map.get(p.player_id) in teams_playing
+        ]
+        # Re-rank after filtering
+        all_scored = rank_players(all_scored)
+        print(f"  {teams_playing} — {len(teams_playing)} teams playing.")
+        print(f"  Filtered: {pre_filter} -> {len(all_scored)} players with games.")
+    else:
+        print(f"  WARNING: No schedule data for {prediction_target}. Keeping all players.")
 
     # Step 7: Write outputs
     print(f"\n[7/8] Writing leaderboard, signals, and predictions ...")

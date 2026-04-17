@@ -17,15 +17,17 @@ The final p_hr is computed via a logistic combination of features,
 then scaled to reasonable probability bounds.
 """
 
+import json
 import logging
 import math
 import sqlite3
 from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from mlb_insights.config import DB_PATH
+from mlb_insights.config import DATA_DIR, DB_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,135 @@ LOGISTIC_WEIGHTS = {
     "platoon_hr_rate":  5.0,
     "power_trend":      1.5,
 }
+
+# Feature names in canonical order (must match LOGISTIC_WEIGHTS keys)
+_FEATURE_NAMES = [
+    "barrel_rate", "avg_exit_velo", "hr_pa_rate",
+    "pitcher_hr_vuln", "park_factor", "platoon_hr_rate", "power_trend",
+]
+
+# Feature centering baselines (subtracted before model application)
+_FEATURE_BASELINES = {
+    "barrel_rate":     LEAGUE_AVG_BARREL_RATE,   # 0.065
+    "avg_exit_velo":   LEAGUE_AVG_EXIT_VELO,     # 88.0
+    "hr_pa_rate":      LEAGUE_AVG_HR_PA_RATE,    # 0.035
+    "pitcher_hr_vuln": 1.0,
+    "park_factor":     1.0,    # log(1.0) = 0
+    "platoon_hr_rate": LEAGUE_AVG_HR_PA_RATE,    # 0.035
+    "power_trend":     0.0,
+}
+
+HR_COEFFICIENTS_PATH = DATA_DIR / "hr_model_coefficients.json"
+
+
+# ── Coefficient Persistence ─────────────────────────────────────────────────
+
+def load_hr_coefficients() -> dict | None:
+    """Load fitted HR model coefficients from disk.
+
+    Returns:
+        Dict with keys 'intercept' and 'weights' (dict of feature->coeff),
+        or None if the file does not exist or is malformed.
+    """
+    if not HR_COEFFICIENTS_PATH.exists():
+        return None
+    try:
+        with open(HR_COEFFICIENTS_PATH) as f:
+            data = json.load(f)
+        # Basic validation
+        if "intercept" not in data or "weights" not in data:
+            logger.warning("hr_model_coefficients.json missing required keys.")
+            return None
+        return data
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to load HR coefficients: %s", exc)
+        return None
+
+
+def fit_hr_model(conn: sqlite3.Connection, min_samples: int = 500) -> dict | None:
+    """Fit logistic regression on historical HR features vs actual outcomes.
+
+    Pulls rows from hr_features joined with batter_stats to determine whether
+    the batter actually hit a HR on that date. Centers features the same way
+    the hardcoded model does, then fits sklearn LogisticRegression.
+
+    Args:
+        conn: Open sqlite3 connection.
+        min_samples: Minimum rows required to fit.  Returns None if fewer.
+
+    Returns:
+        Dict with 'intercept' and 'weights', or None if insufficient data.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    # Join hr_features with batter_stats to get actual HR outcome per game
+    df = pd.read_sql_query("""
+        SELECT
+            hf.feature_date,
+            hf.batter_id,
+            hf.barrel_rate,
+            hf.avg_exit_velo,
+            hf.hr_pa_rate,
+            hf.pitcher_hr_vuln,
+            hf.park_factor,
+            hf.platoon_hr_rate,
+            hf.power_trend,
+            COALESCE(bs.home_runs, 0) AS actual_hr
+        FROM hr_features hf
+        LEFT JOIN batter_stats bs
+            ON hf.batter_id = bs.batter_id
+           AND hf.feature_date = bs.game_date
+    """, conn)
+
+    if len(df) < min_samples:
+        logger.warning(
+            "fit_hr_model: only %d rows (need %d). Skipping refit.",
+            len(df), min_samples,
+        )
+        return None
+
+    # Binary target: did batter hit at least 1 HR that game?
+    y = (df["actual_hr"] >= 1).astype(int).values
+
+    # Build centered feature matrix (same transforms as the hardcoded model)
+    X = np.column_stack([
+        df["barrel_rate"].values - _FEATURE_BASELINES["barrel_rate"],
+        df["avg_exit_velo"].values - _FEATURE_BASELINES["avg_exit_velo"],
+        df["hr_pa_rate"].values - _FEATURE_BASELINES["hr_pa_rate"],
+        df["pitcher_hr_vuln"].values - _FEATURE_BASELINES["pitcher_hr_vuln"],
+        np.log(np.clip(df["park_factor"].values, 0.5, None)),  # log transform
+        df["platoon_hr_rate"].values - _FEATURE_BASELINES["platoon_hr_rate"],
+        df["power_trend"].values - _FEATURE_BASELINES["power_trend"],
+    ])
+
+    logger.info(
+        "fit_hr_model: fitting on %d samples (%d positive, %.2f%% HR rate).",
+        len(y), y.sum(), 100.0 * y.mean(),
+    )
+
+    model = LogisticRegression(
+        penalty="l2",
+        C=1.0,
+        solver="lbfgs",
+        max_iter=1000,
+    )
+    model.fit(X, y)
+
+    coefficients = {
+        "intercept": round(float(model.intercept_[0]), 6),
+        "weights": {
+            name: round(float(model.coef_[0][i]), 6)
+            for i, name in enumerate(_FEATURE_NAMES)
+        },
+    }
+
+    # Save to disk
+    HR_COEFFICIENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(HR_COEFFICIENTS_PATH, "w") as f:
+        json.dump(coefficients, f, indent=2)
+    logger.info("Saved fitted HR coefficients to %s", HR_COEFFICIENTS_PATH)
+
+    return coefficients
 
 
 # ── Barrel Detection ────────────────────────────────────────────────────────
@@ -204,6 +335,11 @@ def compute_hr_features(
         power_trend, p_hr.
     """
     cur = conn.cursor()
+
+    # Load fitted coefficients if available; fall back to hardcoded defaults
+    _fitted = load_hr_coefficients()
+    _intercept = _fitted["intercept"] if _fitted else LOGISTIC_INTERCEPT
+    _weights = _fitted["weights"] if _fitted else LOGISTIC_WEIGHTS
 
     # Load park factors if not provided
     if park_factors is None:
@@ -493,14 +629,14 @@ def compute_hr_features(
             power_trend = 0.0
 
         # ── Compute P(HR) via logistic model ─────────────────────────────
-        logit = LOGISTIC_INTERCEPT
-        logit += LOGISTIC_WEIGHTS["barrel_rate"] * (barrel_rate - LEAGUE_AVG_BARREL_RATE)
-        logit += LOGISTIC_WEIGHTS["avg_exit_velo"] * (avg_exit_velo - LEAGUE_AVG_EXIT_VELO)
-        logit += LOGISTIC_WEIGHTS["hr_pa_rate"] * (hr_pa_rate - LEAGUE_AVG_HR_PA_RATE)
-        logit += LOGISTIC_WEIGHTS["pitcher_hr_vuln"] * (pitcher_vuln_val - 1.0)
-        logit += LOGISTIC_WEIGHTS["park_factor"] * math.log(max(pf, 0.5))
-        logit += LOGISTIC_WEIGHTS["platoon_hr_rate"] * (plat_hr_rate - LEAGUE_AVG_HR_PA_RATE)
-        logit += LOGISTIC_WEIGHTS["power_trend"] * power_trend
+        logit = _intercept
+        logit += _weights["barrel_rate"] * (barrel_rate - LEAGUE_AVG_BARREL_RATE)
+        logit += _weights["avg_exit_velo"] * (avg_exit_velo - LEAGUE_AVG_EXIT_VELO)
+        logit += _weights["hr_pa_rate"] * (hr_pa_rate - LEAGUE_AVG_HR_PA_RATE)
+        logit += _weights["pitcher_hr_vuln"] * (pitcher_vuln_val - 1.0)
+        logit += _weights["park_factor"] * math.log(max(pf, 0.5))
+        logit += _weights["platoon_hr_rate"] * (plat_hr_rate - LEAGUE_AVG_HR_PA_RATE)
+        logit += _weights["power_trend"] * power_trend
 
         # Convert logit to per-PA probability
         p_hr_per_pa = 1.0 / (1.0 + math.exp(-logit))
@@ -672,3 +808,41 @@ def compute_barrel_rate_history(
             })
 
     return pd.DataFrame(results)
+
+
+# ── CLI Entry Point ─────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import sys
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+
+    print("=" * 60)
+    print("HR Model Coefficient Refit")
+    print("=" * 60)
+
+    print("\nDefault (hardcoded) coefficients:")
+    print(f"  intercept: {LOGISTIC_INTERCEPT}")
+    for name in _FEATURE_NAMES:
+        print(f"  {name:20s}: {LOGISTIC_WEIGHTS[name]}")
+
+    min_samples = int(sys.argv[1]) if len(sys.argv) > 1 else 500
+    result = fit_hr_model(conn, min_samples=min_samples)
+
+    if result is None:
+        print(f"\nInsufficient data (need >= {min_samples} rows). No refit performed.")
+        sys.exit(1)
+
+    print("\nFitted coefficients:")
+    print(f"  intercept: {result['intercept']}")
+    for name in _FEATURE_NAMES:
+        old = LOGISTIC_WEIGHTS[name]
+        new = result["weights"][name]
+        delta = new - old
+        print(f"  {name:20s}: {new:+.6f}  (was {old:+.4f}, delta {delta:+.6f})")
+
+    print(f"\nCoefficients saved to {HR_COEFFICIENTS_PATH}")
+    conn.close()

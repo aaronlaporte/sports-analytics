@@ -12,6 +12,7 @@ import numpy as np
 
 from mlb_insights.config import (
     SIGNAL_WEIGHTS, ZSCORE_FLOOR, ZSCORE_CEIL, SCORE_MIN, SCORE_MAX,
+    MIN_SIGNALS_FOR_BOOST, MIN_SINGLE_SIGNAL_CONFIDENCE,
 )
 from mlb_insights.signal_engine.signals import SignalResult
 
@@ -83,6 +84,12 @@ def compute_composite_score(
     for sig in active_signals:
         weight = SIGNAL_WEIGHTS.get(sig.signal_type, 0.05)
         signal_boost += weight * sig.confidence
+
+    # Minimum signal gate: suppress noise from single weak signals
+    n_signals = len(active_signals)
+    if n_signals < MIN_SIGNALS_FOR_BOOST:
+        if n_signals == 0 or active_signals[0].confidence < MIN_SINGLE_SIGNAL_CONFIDENCE:
+            signal_boost = 0.0
 
     return base_score + signal_boost
 

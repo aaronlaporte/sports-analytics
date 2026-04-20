@@ -74,6 +74,57 @@ CREATE TABLE IF NOT EXISTS park_factors (
 );
 """
 
+HR_FEATURES_V2_DDL = """
+CREATE TABLE IF NOT EXISTS hr_features_v2 (
+    feature_date TEXT,
+    batter_id INTEGER,
+    barrel_rate REAL,
+    avg_exit_velo REAL,
+    hr_pa_rate REAL,
+    pitcher_hr_vuln REAL,
+    park_factor REAL,
+    platoon_hr_rate REAL,
+    power_trend REAL,
+    fly_ball_rate REAL,
+    hard_hit_fly_rate REAL,
+    pitcher_recent_hr_vuln REAL,
+    p_hr_v2 REAL,
+    PRIMARY KEY (feature_date, batter_id)
+);
+"""
+
+HR_LEADERBOARD_DDL = """
+CREATE TABLE IF NOT EXISTS hr_leaderboard (
+    prediction_date TEXT,
+    player_id INTEGER,
+    player_name TEXT,
+    team TEXT,
+    hr_rank INTEGER,
+    hr_score REAL,
+    p_hr REAL,
+    barrel_rate REAL,
+    fly_ball_rate REAL,
+    hard_hit_fly_rate REAL,
+    park_factor REAL,
+    active_hr_signal_count INTEGER,
+    top_hr_signal TEXT,
+    PRIMARY KEY (prediction_date, player_id)
+);
+"""
+
+HR_PREDICTION_TRACKING_DDL = """
+CREATE TABLE IF NOT EXISTS hr_prediction_tracking (
+    prediction_date TEXT,
+    player_id INTEGER,
+    hr_rank INTEGER,
+    hr_score REAL,
+    p_hr REAL,
+    actual_hr INTEGER,
+    hr_correct INTEGER,
+    PRIMARY KEY (prediction_date, player_id)
+);
+"""
+
 BATTER_VS_TEAM_DDL = """
 CREATE TABLE IF NOT EXISTS batter_vs_team (
     batter_id     INTEGER,
@@ -150,6 +201,9 @@ def ensure_tables():
         conn.executescript(PLAYER_PAGES_DDL)
         conn.executescript(CALIBRATION_SUMMARY_DDL)
         conn.executescript(HR_FEATURES_DDL)
+        conn.executescript(HR_FEATURES_V2_DDL)
         conn.executescript(PARK_FACTORS_DDL)
         conn.executescript(BATTER_VS_TEAM_DDL)
+        conn.executescript(HR_LEADERBOARD_DDL)
+        conn.executescript(HR_PREDICTION_TRACKING_DDL)
     logger.info("Phase 3 tables verified.")

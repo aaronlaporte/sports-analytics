@@ -272,6 +272,14 @@ def run_single_date(
     except Exception as exc:
         logger.error("HR feature computation failed: %s", exc)
 
+    # Step 3c: Run dedicated HR pipeline
+    print("\n[3c/8] Running HR pipeline ...")
+    try:
+        from mlb_insights.run_hr_pipeline import run_hr_pipeline
+        run_hr_pipeline(date_str, conn)
+    except Exception as exc:
+        logger.error("HR pipeline failed: %s", exc)
+
     # Step 4: Load calibration model (retrain if stale or degraded)
     print("\n[4/8] Loading calibration model ...")
     models = None

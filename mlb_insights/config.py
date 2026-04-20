@@ -147,6 +147,9 @@ BRIER_ROLLING_WINDOWS = [7, 14, 30, 90]
 CALIBRATION_MAX_AGE_DAYS = 14
 CALIBRATION_BRIER_RETRAIN_THRESHOLD = 0.22
 
+HR_CALIBRATION_MAX_AGE_DAYS = 14
+HR_CALIBRATION_BRIER_RETRAIN_THRESHOLD = 0.06
+
 # ── Launch Speed Cache ───────────────────────────────────────────────────────
 
 LAUNCH_SPEED_N_GAMES = 10
@@ -159,3 +162,31 @@ LAUNCH_SPEED_MIN_SAMPLES = 5
 SEASON_WEIGHT_BASE = 0.50
 SEASON_WEIGHT_MONTHLY_STEP = 0.05
 SEASON_WEIGHT_MAX_CAP = 0.75
+
+# ── HR Pipeline V2 ──────────────────────────────────────────────────────────
+HR_FLY_BALL_MIN_BBE = 10
+HR_HARD_HIT_FLY_THRESHOLD = 95.0
+HR_HARD_HIT_FLY_MIN_FLIES = 5
+HR_PITCHER_RECENT_STARTS = 5
+HR_PITCHER_RECENT_MIN_STARTS = 3
+LEAGUE_AVG_FLY_BALL_RATE = 0.35
+LEAGUE_AVG_HARD_HIT_FLY_RATE = 0.25
+
+# HR Signal thresholds
+HR_FB_POWER_MIN_FB_RATE = 0.35
+HR_FB_POWER_MIN_HHF_RATE = 0.20
+HR_FB_POWER_MIN_PARK = 1.0
+HR_PITCHER_FB_PERCENTILE = 0.75
+HR_POWER_STREAK_MIN_HR = 2
+HR_POWER_STREAK_LOOKBACK = 5
+HR_POWER_STREAK_BARREL_THRESHOLD = 0.15
+HR_PLATOON_MIN_HR_RATE = 0.050
+
+# HR signal weights (separate from hit signal weights)
+HR_SIGNAL_WEIGHTS = {
+    "hr_power_signal": 0.12,          # existing signal, higher weight in HR context
+    "hr_fly_ball_power": 0.10,
+    "hr_pitcher_flyball_tendency": 0.08,
+    "hr_power_streak": 0.10,
+    "hr_platoon_power": 0.06,
+}

@@ -55,6 +55,25 @@ def run_hr_pipeline(date_str: str, conn: sqlite3.Connection):
     except Exception as exc:
         logger.error("HR tracking failed: %s", exc)
 
+    # Step 1b: HR retroactive analysis
+    from mlb_insights.signal_engine.hr_retro import run_daily_hr_retro
+    try:
+        run_daily_hr_retro(conn, date_str, lookback_days=30)
+    except Exception as exc:
+        logger.error("HR retro analysis failed: %s", exc)
+
+    # Load tuned HR weights if available
+    import json
+    from mlb_insights.signal_engine.hr_retro import TUNED_HR_WEIGHTS_PATH
+    from mlb_insights import config as _hr_cfg
+    if TUNED_HR_WEIGHTS_PATH.exists():
+        try:
+            with open(TUNED_HR_WEIGHTS_PATH) as f:
+                _hr_cfg.HR_SIGNAL_WEIGHTS.update(json.load(f))
+            logger.info("Loaded tuned HR signal weights from %s", TUNED_HR_WEIGHTS_PATH)
+        except Exception as exc:
+            logger.warning("Failed to load tuned HR weights: %s", exc)
+
     # Step 2: Compute HR features v2
     from mlb_insights.signal_engine.hr_features_v2 import (
         compute_hr_features_v2, write_hr_features_v2
@@ -247,6 +266,11 @@ def main():
         help="Force refit of HR v2 model and HR calibration before running.",
     )
     parser.add_argument(
+        "--retune-signals",
+        action="store_true",
+        help="Run weekly HR signal weight tuning from retro analysis.",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable debug logging.",
@@ -274,6 +298,14 @@ def main():
             print("  HR v2 model retrained.")
         except Exception as exc:
             logger.error("HR v2 model retrain failed: %s", exc)
+
+    if args.retune_signals:
+        print("Running weekly HR signal weight tuning ...")
+        from mlb_insights.signal_engine.hr_retro import run_weekly_hr_retune
+        try:
+            run_weekly_hr_retune(conn, lookback_days=90, dry_run=False)
+        except Exception as exc:
+            logger.error("HR signal retune failed: %s", exc)
 
     run_hr_pipeline(args.date, conn)
     conn.close()

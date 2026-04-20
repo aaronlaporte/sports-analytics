@@ -125,6 +125,20 @@ CREATE TABLE IF NOT EXISTS hr_prediction_tracking (
 );
 """
 
+HR_RETRO_ANALYSIS_DDL = """
+CREATE TABLE IF NOT EXISTS hr_retro_analysis (
+    analysis_date    TEXT,
+    analysis_type    TEXT,
+    signal_type      TEXT,
+    metric_name      TEXT,
+    metric_value     REAL,
+    sample_size      INTEGER,
+    detail_json      TEXT,
+    narrative        TEXT,
+    PRIMARY KEY (analysis_date, analysis_type, COALESCE(signal_type,'_'), metric_name)
+);
+"""
+
 BATTER_VS_TEAM_DDL = """
 CREATE TABLE IF NOT EXISTS batter_vs_team (
     batter_id     INTEGER,
@@ -206,4 +220,14 @@ def ensure_tables():
         conn.executescript(BATTER_VS_TEAM_DDL)
         conn.executescript(HR_LEADERBOARD_DDL)
         conn.executescript(HR_PREDICTION_TRACKING_DDL)
+        conn.executescript(HR_RETRO_ANALYSIS_DDL)
+        # Schema migrations: add columns to existing tables (idempotent)
+        for stmt in [
+            "ALTER TABLE statcast_staging ADD COLUMN pitch_type TEXT",
+            "ALTER TABLE statcast_staging ADD COLUMN release_speed REAL",
+        ]:
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
     logger.info("Phase 3 tables verified.")

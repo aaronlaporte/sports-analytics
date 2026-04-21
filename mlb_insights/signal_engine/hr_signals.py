@@ -167,15 +167,23 @@ def hr_fly_ball_power(
 def hr_pitcher_flyball_tendency(
     pitcher_fb_rates: dict[int, float],
     opp_pitcher_ids: set[int],
+    hr_features: dict | None = None,
 ) -> SignalResult | None:
     """HR Signal 2: Opposing pitcher has a high fly ball allowed rate.
 
     Fires when at least one opposing pitcher's fly ball rate exceeds the
     75th percentile among all pitchers in pitcher_fb_rates.
 
+    Confidence is scaled by the batter's own power profile (barrel rate,
+    exit velo, fly ball rate) so that elite power hitters get a large
+    boost while contact-only hitters get a minimal one.
+
     Args:
         pitcher_fb_rates: Precomputed dict of pitcher_id -> fly_ball_rate.
         opp_pitcher_ids: Set of opposing pitcher IDs for the matchup.
+        hr_features: Row from hr_features as dict (barrel_rate, avg_exit_velo,
+            fly_ball_rate). If None, the signal still fires but at a
+            reduced baseline confidence.
 
     Returns:
         SignalResult or None.
@@ -202,22 +210,66 @@ def hr_pitcher_flyball_tendency(
     if best_pitcher_id is None:
         return None
 
-    confidence = _clamp_confidence(
-        min((best_rate - percentile_75) / 0.05, 1.0)
-    )
+    # Pitcher-side confidence: how far above the 75th percentile
+    pitcher_confidence = min((best_rate - percentile_75) / 0.05, 1.0)
+
+    # Batter power scaling: scale confidence by batter's ability to
+    # actually take advantage of fly-ball-prone pitching.
+    # Without power metrics, cap at 0.30 (weak baseline).
+    barrel_rate = 0.0
+    avg_exit_velo = 0.0
+    fly_ball_rate = 0.0
+    if hr_features:
+        barrel_rate = hr_features.get("barrel_rate", 0) or 0
+        avg_exit_velo = hr_features.get("avg_exit_velo", 0) or 0
+        fly_ball_rate = hr_features.get("fly_ball_rate", 0) or 0
+
+    # Barrel factor: 0 barrels = 0.0, 6% (league avg) = 0.4, 12%+ = 1.0
+    barrel_factor = min(barrel_rate / 0.12, 1.0)
+
+    # Exit velo factor: <85 mph = 0.0, 88 (avg) = 0.4, 93+ = 1.0
+    if avg_exit_velo >= 93:
+        ev_factor = 1.0
+    elif avg_exit_velo >= 85:
+        ev_factor = (avg_exit_velo - 85) / (93 - 85)
+    else:
+        ev_factor = 0.0
+
+    # Fly ball factor: batter's own FB% matters — if they don't elevate,
+    # a fly-ball pitcher doesn't help them.  10% = 0.0, 20% = 0.5, 30%+ = 1.0
+    fb_factor = min(max((fly_ball_rate - 0.10) / 0.20, 0.0), 1.0)
+
+    # Combined batter power multiplier: weighted blend
+    # Barrel rate is the strongest indicator, exit velo second, FB% third
+    batter_power = 0.50 * barrel_factor + 0.30 * ev_factor + 0.20 * fb_factor
+
+    # Final confidence: pitcher signal * batter power
+    # Floor of 0.10 if the pitcher signal fires at all (minimum acknowledgment)
+    confidence = _clamp_confidence(pitcher_confidence * max(batter_power, 0.10))
+
+    reasons = [
+        f"Pitcher fly ball rate: {best_rate:.1%}",
+        f"75th percentile threshold: {percentile_75:.1%}",
+    ]
+    if hr_features:
+        reasons.append(
+            f"Batter power profile: barrel {barrel_rate:.1%}, "
+            f"exit velo {avg_exit_velo:.0f} mph, FB% {fly_ball_rate:.1%}"
+        )
 
     return SignalResult(
         signal_type="hr_pitcher_flyball_tendency",
         confidence=confidence,
-        headline=f"Opposing pitcher allows high fly ball rate ({best_rate:.1%})",
-        reasons=[
-            f"Pitcher fly ball rate: {best_rate:.1%}",
-            f"75th percentile threshold: {percentile_75:.1%}",
-            f"Excess over threshold: +{best_rate - percentile_75:.1%}",
-        ],
+        headline=(
+            f"Fly-ball pitcher ({best_rate:.1%} FB) vs "
+            f"{'power hitter' if batter_power >= 0.5 else 'batter'} "
+            f"(barrel {barrel_rate:.1%})"
+        ),
+        reasons=reasons,
         interpretation=(
-            "Opposing pitcher allows fly balls at an elevated rate, "
-            "increasing home run opportunity"
+            "Opposing pitcher allows fly balls at an elevated rate. "
+            "Signal strength scaled by batter's own power metrics "
+            "(barrel rate, exit velocity, fly ball rate)"
         ),
     )
 
@@ -395,9 +447,11 @@ def evaluate_hr_signals(
             batter_id, game_date, exc,
         )
 
-    # Signal 2: Pitcher fly-ball tendency
+    # Signal 2: Pitcher fly-ball tendency (scaled by batter power)
     try:
-        result = hr_pitcher_flyball_tendency(pitcher_fb_rates, opp_pitcher_ids)
+        result = hr_pitcher_flyball_tendency(
+            pitcher_fb_rates, opp_pitcher_ids, hr_features=hr_features,
+        )
         if result is not None:
             fired.append(result)
     except Exception as exc:

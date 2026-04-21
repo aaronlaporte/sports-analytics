@@ -129,13 +129,13 @@ HR_RETRO_ANALYSIS_DDL = """
 CREATE TABLE IF NOT EXISTS hr_retro_analysis (
     analysis_date    TEXT,
     analysis_type    TEXT,
-    signal_type      TEXT,
+    signal_type      TEXT NOT NULL DEFAULT '_',
     metric_name      TEXT,
     metric_value     REAL,
     sample_size      INTEGER,
     detail_json      TEXT,
     narrative        TEXT,
-    PRIMARY KEY (analysis_date, analysis_type, COALESCE(signal_type,'_'), metric_name)
+    PRIMARY KEY (analysis_date, analysis_type, signal_type, metric_name)
 );
 """
 

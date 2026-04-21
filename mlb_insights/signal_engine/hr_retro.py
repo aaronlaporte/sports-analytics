@@ -484,7 +484,7 @@ def write_retro_analysis(
             INSERT INTO hr_retro_analysis
                 (analysis_date, analysis_type, signal_type, metric_name,
                  metric_value, sample_size, detail_json)
-            VALUES (?, 'false_negative', NULL, ?, ?, ?, ?)
+            VALUES (?, 'false_negative', '_', ?, ?, ?, ?)
         """, (date_str, feature, mean_val, false_neg["missed_count"], detail))
 
     # Cooccurrence: one row per combo
@@ -494,7 +494,7 @@ def write_retro_analysis(
             INSERT INTO hr_retro_analysis
                 (analysis_date, analysis_type, signal_type, metric_name,
                  metric_value, sample_size, detail_json)
-            VALUES (?, 'cooccurrence', NULL, 'hr_rate', ?, ?, ?)
+            VALUES (?, 'cooccurrence', '_', 'hr_rate', ?, ?, ?)
         """, (date_str, combo_data["hr_rate"], combo_data["fire_count"], detail))
 
     # Contextual: one row per finding
@@ -504,7 +504,7 @@ def write_retro_analysis(
             INSERT INTO hr_retro_analysis
                 (analysis_date, analysis_type, signal_type, metric_name,
                  metric_value, sample_size, detail_json)
-            VALUES (?, 'contextual', NULL, ?, ?, ?, ?)
+            VALUES (?, 'contextual', '_', ?, ?, ?, ?)
         """, (
             date_str, finding["metric_name"],
             finding["sample_size"],  # use sample_size as metric_value placeholder

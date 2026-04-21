@@ -94,11 +94,11 @@ def update_hr_calibration_summary(date_str: str, conn: sqlite3.Connection):
         ).strftime("%Y-%m-%d")
 
         rows = conn.execute("""
-            SELECT p_hr, actual_hr, daily_rank
+            SELECT p_hr, actual_hr, hr_rank
             FROM hr_prediction_tracking
             WHERE prediction_date > ? AND prediction_date <= ?
               AND actual_hr IS NOT NULL
-            ORDER BY prediction_date, daily_rank
+            ORDER BY prediction_date, hr_rank
         """, (start_date, date_str)).fetchall()
 
         if len(rows) < 10:
@@ -122,7 +122,7 @@ def update_hr_calibration_summary(date_str: str, conn: sqlite3.Connection):
             hits = 0
             total = 0
             for day_rows in daily_groups.values():
-                top = [r for r in day_rows if r["daily_rank"] <= n]
+                top = [r for r in day_rows if r["hr_rank"] <= n]
                 for r in top:
                     total += 1
                     if (r["actual_hr"] or 0) >= 1:
@@ -165,10 +165,10 @@ def print_hr_tracking_summary(date_str: str, conn: sqlite3.Connection):
 
     # Yesterday's HR results
     rows = conn.execute("""
-        SELECT daily_rank, p_hr, actual_hr
+        SELECT hr_rank, p_hr, actual_hr
         FROM hr_prediction_tracking
         WHERE prediction_date = ? AND actual_hr IS NOT NULL
-        ORDER BY daily_rank
+        ORDER BY hr_rank
     """, (yesterday,)).fetchall()
 
     if not rows:
@@ -179,15 +179,15 @@ def print_hr_tracking_summary(date_str: str, conn: sqlite3.Connection):
     hr_rate = sum(1 for r in rows if (r["actual_hr"] or 0) >= 1) / total
 
     # Top 5 performance
-    top5 = [r for r in rows if r["daily_rank"] <= 5]
+    top5 = [r for r in rows if r["hr_rank"] <= 5]
     top5_hr = sum(1 for r in top5 if (r["actual_hr"] or 0) >= 1) / len(top5) if top5 else 0
 
     # Top 10 performance
-    top10 = [r for r in rows if r["daily_rank"] <= 10]
+    top10 = [r for r in rows if r["hr_rank"] <= 10]
     top10_hr = sum(1 for r in top10 if (r["actual_hr"] or 0) >= 1) / len(top10) if top10 else 0
 
     # Top 15 performance
-    top15 = [r for r in rows if r["daily_rank"] <= 15]
+    top15 = [r for r in rows if r["hr_rank"] <= 15]
     top15_hr = sum(1 for r in top15 if (r["actual_hr"] or 0) >= 1) / len(top15) if top15 else 0
 
     print(f"\n  HR Tracking Summary for {yesterday}:")

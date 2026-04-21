@@ -274,19 +274,49 @@ c3.metric(
 st.markdown("")
 
 
-# Highlight season total column
-def highlight_season_col(s):
-    return [
-        "background-color: rgba(77, 171, 247, 0.25); font-weight: bold"
-        if s.name == f"Season {label}"
-        else ""
-        for _ in s
-    ]
+# Color coding for game columns
+# Strikeouts: red = bad (high), green = good (low). Everything else: green = good (high).
+is_inverse = metric == "Strikeouts"
 
+
+def color_game_cell(val):
+    """Color a single game cell based on value."""
+    if pd.isna(val) or not isinstance(val, (int, float)):
+        return ""
+    v = int(val)
+    if v == 0:
+        if is_inverse:
+            return "background-color: rgba(0, 180, 0, 0.20)"
+        return ""
+    if is_inverse:
+        # Strikeouts: 1 = yellow, 2 = orange, 3+ = red
+        if v == 1:
+            return "background-color: rgba(220, 180, 0, 0.25)"
+        elif v == 2:
+            return "background-color: rgba(230, 120, 0, 0.30)"
+        else:
+            return "background-color: rgba(200, 50, 50, 0.35)"
+    else:
+        # Positive metrics: 1 = light green, 2 = medium green, 3+ = bright green
+        if v == 1:
+            return "background-color: rgba(0, 180, 0, 0.15)"
+        elif v == 2:
+            return "background-color: rgba(0, 180, 0, 0.30)"
+        elif v == 3:
+            return "background-color: rgba(0, 180, 0, 0.45)"
+        else:
+            return "background-color: rgba(0, 180, 0, 0.60); font-weight: bold"
+
+
+game_display_cols = [f"G{i}" for i in range(1, 16)]
 
 styled = (
     display_df.style
-    .apply(highlight_season_col, axis=0)
+    .map(color_game_cell, subset=game_display_cols)
+    .map(
+        lambda v: "background-color: rgba(77, 171, 247, 0.25); font-weight: bold",
+        subset=[f"Season {label}"],
+    )
     .format({f"Season {label}": "{:,d}"})
 )
 

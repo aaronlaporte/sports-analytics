@@ -135,6 +135,7 @@ st.subheader("Navigation")
 st.page_link("pages/1_Leaderboard.py", label="Leaderboard -- Daily ranked players", icon=":material/format_list_numbered:")
 st.page_link("pages/2_Player_Page.py", label="Player Page -- Individual drill-down", icon=":material/person:")
 st.page_link("pages/3_Trends.py", label="Trends -- Model calibration & accuracy over time", icon=":material/trending_up:")
+st.page_link("pages/4_Season_Stats.py", label="Season Stats -- Self-serve season totals & last-15 games per player", icon=":material/table_chart:")
 
 st.markdown("---")
 st.caption("MLB Player Insights Platform v0.1 | Data refreshed daily")

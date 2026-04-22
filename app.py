@@ -137,6 +137,7 @@ st.page_link("pages/2_Player_Page.py", label="Player Page -- Individual drill-do
 st.page_link("pages/3_Trends.py", label="Trends -- Model calibration & accuracy over time", icon=":material/trending_up:")
 st.page_link("pages/4_Season_Stats.py", label="Season Stats -- Self-serve season totals & last-15 games per player", icon=":material/table_chart:")
 st.page_link("pages/5_HR_Lab.py", label="HR Lab -- Home run analytics, power profiles & statcast deep dives", icon=":material/sports_baseball:")
+st.page_link("pages/6_Explore.py", label="Explore -- Dynamic scatter plots, pick any two metrics", icon=":material/scatter_plot:")
 
 st.markdown("---")
 st.caption("MLB Player Insights Platform v0.1 | Data refreshed daily")

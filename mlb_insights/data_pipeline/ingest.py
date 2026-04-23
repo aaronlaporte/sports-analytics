@@ -116,11 +116,12 @@ def pull_statcast_range(start: str, end: str, conn: sqlite3.Connection) -> int:
 # ── Schedules ────────────────────────────────────────────────────────────────
 
 def pull_schedule(date_str: str, conn: sqlite3.Connection) -> list[dict]:
-    """Fetch today's games and probable pitchers from the schedules table.
+    """Fetch games for a date from the schedules table.
 
-    If schedules are not yet populated for this date, attempt to pull
-    via the SportsDataIO client (shared/sdio_client.py).  Falls back
-    gracefully if the API is unavailable.
+    Attempts three sources in order:
+      1. Existing rows in the ``schedules`` table.
+      2. MLB Stats API (free, no key required).
+      3. SportsDataIO API (requires API key — used for lineup detail).
 
     Args:
         date_str: Date in YYYY-MM-DD format.
@@ -128,7 +129,7 @@ def pull_schedule(date_str: str, conn: sqlite3.Connection) -> list[dict]:
 
     Returns:
         List of dicts with keys: game_id, home_team, away_team,
-        home_pitcher_id, away_pitcher_id, lineup_confirmed.
+        home_pitcher_id, away_pitcher_id, lineup_confirmed, status.
     """
     # Check existing schedule data
     rows = conn.execute(
@@ -136,14 +137,25 @@ def pull_schedule(date_str: str, conn: sqlite3.Connection) -> list[dict]:
     ).fetchall()
 
     if not rows:
-        logger.info("No schedule data for %s. Attempting SDIO pull ...", date_str)
+        # Try free MLB Stats API first (always available)
+        try:
+            _pull_schedule_from_mlb_api(date_str, conn)
+            rows = conn.execute(
+                "SELECT * FROM schedules WHERE game_date = ?", (date_str,)
+            ).fetchall()
+        except Exception as exc:
+            logger.warning("MLB Stats API schedule pull failed for %s: %s", date_str, exc)
+
+    if not rows:
+        # Fallback: try SDIO (requires API key)
+        logger.info("No schedule from MLB API for %s. Trying SDIO ...", date_str)
         try:
             _pull_schedule_from_sdio(date_str, conn)
             rows = conn.execute(
                 "SELECT * FROM schedules WHERE game_date = ?", (date_str,)
             ).fetchall()
         except Exception as exc:
-            logger.warning("Schedule pull failed for %s: %s", date_str, exc)
+            logger.warning("SDIO schedule pull also failed for %s: %s", date_str, exc)
             return []
 
     games = []
@@ -162,8 +174,73 @@ def pull_schedule(date_str: str, conn: sqlite3.Connection) -> list[dict]:
     return games
 
 
+def _pull_schedule_from_mlb_api(date_str: str, conn: sqlite3.Connection):
+    """Pull schedule from the free MLB Stats API (statsapi.mlb.com).
+
+    No API key required.  Populates the ``schedules`` table with game_id,
+    teams, and status.  Does not include pitcher IDs (use SDIO for that).
+    """
+    import requests
+
+    url = (
+        f"https://statsapi.mlb.com/api/v1/schedule"
+        f"?date={date_str}&sportId=1&hydrate=team"
+    )
+    resp = requests.get(url, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+
+    dates = data.get("dates", [])
+    if not dates:
+        logger.info("MLB Stats API returned no dates for %s.", date_str)
+        return
+
+    games = dates[0].get("games", [])
+    if not games:
+        logger.info("MLB Stats API: no games on %s.", date_str)
+        return
+
+    inserted = 0
+    for g in games:
+        game_pk = g.get("gamePk")
+        if not game_pk:
+            continue
+        # Only include regular season / postseason games
+        game_type = g.get("gameType", "")
+        if game_type not in ("R", "F", "D", "L", "W", "P"):
+            continue
+
+        home_team = g.get("teams", {}).get("home", {}).get("team", {})
+        away_team = g.get("teams", {}).get("away", {}).get("team", {})
+        home_abbr = home_team.get("abbreviation")
+        away_abbr = away_team.get("abbreviation")
+        status = g.get("status", {}).get("detailedState", "Scheduled")
+
+        # Skip postponed / cancelled
+        if status in ("Postponed", "Cancelled", "Suspended"):
+            continue
+
+        conn.execute("""
+            INSERT OR IGNORE INTO schedules
+                (game_id, game_date, home_team, away_team, status,
+                 lineup_confirmed, home_pitcher_id, away_pitcher_id)
+            VALUES (?,?,?,?,?,0,NULL,NULL)
+        """, (game_pk, date_str, home_abbr, away_abbr, status))
+        inserted += 1
+
+    conn.commit()
+    logger.info(
+        "MLB Stats API: %d games inserted for %s.", inserted, date_str,
+    )
+
+
 def _pull_schedule_from_sdio(date_str: str, conn: sqlite3.Connection):
-    """Internal: pull schedule from SDIO API and write to schedules table."""
+    """Pull schedule from SDIO API and write to schedules table.
+
+    Requires an API key (SDIO_API_KEY env var or keys/sdio_key.txt).
+    Provides lineup confirmation and starting pitcher IDs that the
+    free MLB Stats API does not include.
+    """
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))

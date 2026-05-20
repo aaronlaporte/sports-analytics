@@ -1,3 +1,4 @@
+-e /Users/aaronlaporte/Documents/GitHub/nomadata-toolkit
 pandas
 numpy
 requests
